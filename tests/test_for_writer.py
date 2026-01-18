@@ -1,0 +1,833 @@
+"""Tests for .for (Forte/PC3) output format."""
+
+import struct
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from wav2krz.converter import (
+    ConversionMode,
+    WavEntry,
+    convert_from_list_file,
+    convert_wavs_to_krz,
+)
+from wav2krz.krz.for_templates import (
+    _BLK_CAL_KMID,
+    _BLK_FINAL_MARKER,
+    _BLK_HIKEY,
+    _BLK_LAYER_IDX,
+    _BLK_LOKEY,
+    _BLK_VEL_ZONE,
+    L1_CAL_KMID2_OFFSET,
+    L1_CAL_KMID_OFFSET,
+    L1_LYR_HIKEY_OFFSET,
+    L1_LYR_LOKEY_OFFSET,
+    L2_CAL_KMID_OFFSET,
+    L2_LYR_HIKEY_OFFSET,
+    L2_LYR_LOKEY_OFFSET,
+    LAYER_BLOCK_SIZE,
+    LAYER_BLOCK_START,
+    LAYER_COUNT_OFFSET,
+    PROGRAM_1LAYER,
+    PROGRAM_2LAYER,
+    build_program_data,
+    patch_program_template,
+)
+
+from .helpers import make_wav
+
+
+def parse_for_file(data: bytes) -> dict:
+    """Minimal .for parser for test verification."""
+    magic = data[:4]
+    osize = struct.unpack('>I', data[8:12])[0]
+    outer_block_size = struct.unpack('>i', data[32:36])[0]
+
+    objects = []
+    pos = 36
+    while pos + 20 <= len(data) and pos < osize:
+        field0 = struct.unpack('>I', data[pos:pos+4])[0]
+        if field0 not in (138, 133, 170):
+            break  # null terminator or invalid object
+        obj_id = struct.unpack('>I', data[pos+4:pos+8])[0]
+        field3 = struct.unpack('>I', data[pos+12:pos+16])[0]
+        if field3 == 0:
+            break
+
+        # Read name
+        name_start = pos + 20
+        end = name_start
+        while end < len(data) and data[end] != 0:
+            end += 1
+        name = data[name_start:end].decode('latin-1')
+
+        # Padded name end
+        name_with_null_len = end - name_start + 1
+        padded_end = name_start + ((name_with_null_len + 3) & ~3)
+
+        obj_data = data[padded_end:pos + field3]
+        objects.append({
+            'field0': field0, 'id': obj_id, 'name': name,
+            'data': obj_data, 'total_size': field3,
+        })
+        pos += field3
+
+    return {
+        'magic': magic, 'osize': osize,
+        'outer_block_size': outer_block_size,
+        'objects': objects,
+        'sample_data': data[osize:] if osize < len(data) else b'',
+    }
+
+
+class TestForTemplates(unittest.TestCase):
+    """Tests for program template integrity and patching."""
+
+    def test_1layer_template_size(self):
+        self.assertEqual(len(PROGRAM_1LAYER), 1380)
+
+    def test_2layer_template_size(self):
+        self.assertEqual(len(PROGRAM_2LAYER), 1696)
+
+    def test_1layer_template_signatures(self):
+        self.assertEqual(PROGRAM_1LAYER[LAYER_COUNT_OFFSET], 1)
+        self.assertEqual(PROGRAM_1LAYER[0xE5], 0x09)  # LYR tag
+        self.assertEqual(PROGRAM_1LAYER[0x167], 0x40)  # CAL tag
+
+    def test_2layer_template_signatures(self):
+        self.assertEqual(PROGRAM_2LAYER[LAYER_COUNT_OFFSET], 2)
+        self.assertEqual(PROGRAM_2LAYER[0xE5], 0x09)   # L1 LYR tag
+        self.assertEqual(PROGRAM_2LAYER[0x167], 0x40)   # L1 CAL tag
+        self.assertEqual(PROGRAM_2LAYER[0x223], 0x09)   # L2 LYR tag
+        self.assertEqual(PROGRAM_2LAYER[0x2A5], 0x40)   # L2 CAL tag
+
+    def test_patch_1layer(self):
+        patched = patch_program_template(
+            PROGRAM_1LAYER, layer_count=1,
+            keymap_ids=[2048], key_ranges=[(24, 96)])
+        self.assertEqual(patched[LAYER_COUNT_OFFSET], 1)
+        self.assertEqual(patched[L1_LYR_LOKEY_OFFSET], 24)
+        self.assertEqual(patched[L1_LYR_HIKEY_OFFSET], 96)
+        kmid = struct.unpack('>I', patched[L1_CAL_KMID_OFFSET:L1_CAL_KMID_OFFSET+4])[0]
+        self.assertEqual(kmid, 2048)
+        kmid2 = struct.unpack('>I', patched[L1_CAL_KMID2_OFFSET:L1_CAL_KMID2_OFFSET+4])[0]
+        self.assertEqual(kmid2, 2048)
+
+    def test_patch_2layer(self):
+        patched = patch_program_template(
+            PROGRAM_2LAYER, layer_count=2,
+            keymap_ids=[1024, 1025], key_ranges=[(0, 60), (61, 127)])
+        self.assertEqual(patched[LAYER_COUNT_OFFSET], 2)
+        self.assertEqual(patched[L1_LYR_LOKEY_OFFSET], 0)
+        self.assertEqual(patched[L1_LYR_HIKEY_OFFSET], 60)
+        kmid = struct.unpack('>I', patched[L1_CAL_KMID_OFFSET:L1_CAL_KMID_OFFSET+4])[0]
+        self.assertEqual(kmid, 1024)
+        self.assertEqual(patched[L2_LYR_LOKEY_OFFSET], 61)
+        self.assertEqual(patched[L2_LYR_HIKEY_OFFSET], 127)
+        kmid = struct.unpack('>I', patched[L2_CAL_KMID_OFFSET:L2_CAL_KMID_OFFSET+4])[0]
+        self.assertEqual(kmid, 1025)
+
+    def test_build_3layer(self):
+        data = build_program_data(
+            3, keymap_ids=[1024, 1025, 1026],
+            key_ranges=[(0, 63), (64, 67), (68, 127)])
+        self.assertEqual(data[LAYER_COUNT_OFFSET], 3)
+        # Check expected size: prefix(231) + 3*block(318) + suffix(829)
+        expected = 231 + 3 * 318 + 829
+        self.assertEqual(len(data), expected)
+        # Verify each layer's key range
+        for i, (lo, hi) in enumerate([(0, 63), (64, 67), (68, 127)]):
+            blk = LAYER_BLOCK_START + i * LAYER_BLOCK_SIZE
+            self.assertEqual(data[blk + _BLK_LOKEY], lo)
+            self.assertEqual(data[blk + _BLK_HIKEY], hi)
+
+    def test_build_3layer_keymap_ids(self):
+        data = build_program_data(
+            3, keymap_ids=[1024, 1025, 1026],
+            key_ranges=[(0, 63), (64, 67), (68, 127)])
+        for i, km_id in enumerate([1024, 1025, 1026]):
+            blk = LAYER_BLOCK_START + i * LAYER_BLOCK_SIZE
+            actual = struct.unpack('>I', data[blk + _BLK_CAL_KMID:blk + _BLK_CAL_KMID + 4])[0]
+            self.assertEqual(actual, km_id)
+
+    def test_build_3layer_layer_indices(self):
+        data = build_program_data(
+            3, keymap_ids=[1024, 1025, 1026],
+            key_ranges=[(0, 63), (64, 67), (68, 127)])
+        for i in range(3):
+            blk = LAYER_BLOCK_START + i * LAYER_BLOCK_SIZE
+            self.assertEqual(data[blk + _BLK_LAYER_IDX], i)
+
+    def test_build_3layer_final_markers(self):
+        data = build_program_data(
+            3, keymap_ids=[1024, 1025, 1026],
+            key_ranges=[(0, 63), (64, 67), (68, 127)])
+        for i in range(3):
+            blk = LAYER_BLOCK_START + i * LAYER_BLOCK_SIZE
+            marker = data[blk + _BLK_FINAL_MARKER:blk + _BLK_FINAL_MARKER + 2]
+            if i == 2:  # last layer
+                self.assertEqual(marker, b'\x00\x01')
+            else:
+                self.assertEqual(marker, b'\x09\x00')
+
+    def test_build_1layer_matches_template(self):
+        data = build_program_data(
+            1, keymap_ids=[1024], key_ranges=[(0, 127)])
+        patched = patch_program_template(
+            PROGRAM_1LAYER, 1, [1024], [(0, 127)])
+        self.assertEqual(data, patched)
+
+    def test_build_2layer_matches_template(self):
+        data = build_program_data(
+            2, keymap_ids=[1024, 1025], key_ranges=[(0, 60), (61, 127)])
+        patched = patch_program_template(
+            PROGRAM_2LAYER, 2, [1024, 1025], [(0, 60), (61, 127)])
+        self.assertEqual(data, patched)
+
+    def test_build_1layer_vel_zone(self):
+        """build_program_data patches vel_zone for 1-layer case."""
+        data = build_program_data(
+            1, keymap_ids=[1024], key_ranges=[(0, 127)],
+            vel_zones=[(0, 3)])
+        # ppp-mp: (0+1)*8 - (3+1) = 4
+        self.assertEqual(data[LAYER_BLOCK_START + _BLK_VEL_ZONE], 4)
+
+    def test_build_2layer_vel_zones(self):
+        """build_program_data patches vel_zones for 2-layer case."""
+        data = build_program_data(
+            2, keymap_ids=[1024, 1025], key_ranges=[(0, 127), (0, 127)],
+            vel_zones=[(0, 3), (4, 7)])
+        # Layer 0: ppp-mp = 4
+        blk0 = LAYER_BLOCK_START
+        self.assertEqual(data[blk0 + _BLK_VEL_ZONE], 4)
+        # Layer 1: mf-fff = 32
+        blk1 = LAYER_BLOCK_START + LAYER_BLOCK_SIZE
+        self.assertEqual(data[blk1 + _BLK_VEL_ZONE], 32)
+
+    def test_build_3layer_vel_zones(self):
+        """build_program_data patches vel_zones for 3-layer case."""
+        data = build_program_data(
+            3, keymap_ids=[1024, 1025, 1026],
+            key_ranges=[(0, 127)] * 3,
+            vel_zones=[(0, 2), (3, 4), (5, 7)])
+        expected = [
+            (0 + 1) * 8 - (2 + 1),  # ppp-p = 5
+            (3 + 1) * 8 - (4 + 1),  # mp-mf = 27
+            (5 + 1) * 8 - (7 + 1),  # f-fff = 40
+        ]
+        for i, exp in enumerate(expected):
+            blk = LAYER_BLOCK_START + i * LAYER_BLOCK_SIZE
+            self.assertEqual(data[blk + _BLK_VEL_ZONE], exp)
+
+    def test_build_no_vel_zones_leaves_default(self):
+        """Without vel_zones, the vel_zone byte stays at default (0)."""
+        data = build_program_data(
+            2, keymap_ids=[1024, 1025], key_ranges=[(0, 60), (61, 127)])
+        blk0 = LAYER_BLOCK_START
+        blk1 = LAYER_BLOCK_START + LAYER_BLOCK_SIZE
+        self.assertEqual(data[blk0 + _BLK_VEL_ZONE], 0)
+        self.assertEqual(data[blk1 + _BLK_VEL_ZONE], 0)
+
+
+class TestForWriterFileStructure(unittest.TestCase):
+    """Tests for .for file structural correctness."""
+
+    def test_magic_and_osize(self):
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav')
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.INSTRUMENT)
+            parsed = parse_for_file(out.read_bytes())
+            self.assertEqual(parsed['magic'], b'COOL')
+            self.assertGreater(parsed['osize'], 0)
+
+    def test_outer_block_size(self):
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav')
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.INSTRUMENT)
+            parsed = parse_for_file(out.read_bytes())
+            # outer_block_size should be negative, abs = osize - 36
+            self.assertEqual(abs(parsed['outer_block_size']),
+                             parsed['osize'] - 36)
+
+    def test_osize_matches_end_of_objects(self):
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav')
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.INSTRUMENT)
+            data = out.read_bytes()
+            parsed = parse_for_file(data)
+            # Sum of all object sizes + 36 header + 4 terminator should equal osize
+            total = 36 + sum(o['total_size'] for o in parsed['objects']) + 4
+            self.assertEqual(total, parsed['osize'])
+
+
+class TestForWriterSample(unittest.TestCase):
+    """Tests for .for sample object serialization."""
+
+    def test_mono_sample_size(self):
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav')
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.SAMPLES)
+            parsed = parse_for_file(out.read_bytes())
+            samples = [o for o in parsed['objects'] if o['field0'] == 170]
+            self.assertEqual(len(samples), 1)
+            self.assertEqual(len(samples[0]['data']), 120)
+
+    def test_mono_envelope_offset(self):
+        """Verify envofs = 16 for mono sample (distance from envofs field to envelope)."""
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav')
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.SAMPLES)
+            parsed = parse_for_file(out.read_bytes())
+            sd = [o for o in parsed['objects'] if o['field0'] == 170][0]['data']
+            # envofs at SFH offset 40 = data offset 56
+            envofs = struct.unpack('>h', sd[56:58])[0]
+            alt_envofs = struct.unpack('>h', sd[58:60])[0]
+            self.assertEqual(envofs, 16)
+            self.assertEqual(alt_envofs, 14)
+
+    def test_stereo_envelope_offsets(self):
+        """Verify envofs = 72/16 for stereo (two SFH+extra blocks)."""
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav', channels=2)
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.SAMPLES)
+            parsed = parse_for_file(out.read_bytes())
+            sd = [o for o in parsed['objects'] if o['field0'] == 170][0]['data']
+            # SFH1 envofs at data[56]
+            env1 = struct.unpack('>h', sd[56:58])[0]
+            self.assertEqual(env1, 72)
+            # SFH2 envofs at data[72+40=112]
+            env2 = struct.unpack('>h', sd[112:114])[0]
+            self.assertEqual(env2, 16)
+
+    def test_stereo_sample_size(self):
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav', channels=2)
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.SAMPLES)
+            parsed = parse_for_file(out.read_bytes())
+            samples = [o for o in parsed['objects'] if o['field0'] == 170]
+            self.assertEqual(len(samples), 1)
+            self.assertEqual(len(samples[0]['data']), 176)
+
+    def test_sample_offsets_are_doubled(self):
+        """Verify sample offsets are in bytes (2x .krz sample units)."""
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav', duration=0.1)
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.SAMPLES)
+            parsed = parse_for_file(out.read_bytes())
+            sd = [o for o in parsed['objects'] if o['field0'] == 170][0]['data']
+            # SFH starts at offset 16, sample_end at +32 (8 bytes)
+            sample_end = struct.unpack('>q', sd[48:56])[0]
+            # sample_end should be even (byte offset = sample_count * 2)
+            self.assertEqual(sample_end % 2, 0)
+            self.assertGreater(sample_end, 0)
+
+    def test_sample_metadata(self):
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav')
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.SAMPLES)
+            parsed = parse_for_file(out.read_bytes())
+            sd = [o for o in parsed['objects'] if o['field0'] == 170][0]['data']
+            base_id = struct.unpack('>I', sd[0:4])[0]
+            stereo = struct.unpack('>H', sd[6:8])[0]
+            headers_ofs = struct.unpack('>H', sd[8:10])[0]
+            self.assertEqual(base_id, 1)
+            self.assertEqual(stereo, 0)
+            self.assertEqual(headers_ofs, 8)
+
+    def test_stereo_flag(self):
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav', channels=2)
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.SAMPLES)
+            parsed = parse_for_file(out.read_bytes())
+            sd = [o for o in parsed['objects'] if o['field0'] == 170][0]['data']
+            stereo = struct.unpack('>H', sd[6:8])[0]
+            self.assertEqual(stereo, 1)
+
+    def test_sample_audio_data_preserved(self):
+        """Verify sample audio data section is byte-for-byte correct."""
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav', duration=0.01)
+            out_for = Path(tmpdir) / 'test.for'
+            out_krz = Path(tmpdir) / 'test.krz'
+            convert_wavs_to_krz([wav], out_for, mode=ConversionMode.SAMPLES)
+            convert_wavs_to_krz([wav], out_krz, mode=ConversionMode.SAMPLES)
+
+            for_data = out_for.read_bytes()
+            krz_data = out_krz.read_bytes()
+
+            for_osize = struct.unpack('>I', for_data[8:12])[0]
+            krz_osize = struct.unpack('>I', krz_data[4:8])[0]
+
+            for_samples = for_data[for_osize:]
+            krz_samples = krz_data[krz_osize:]
+
+            self.assertEqual(for_samples, krz_samples)
+
+
+class TestForWriterKeymap(unittest.TestCase):
+    """Tests for .for keymap object serialization."""
+
+    def test_keymap_prefix(self):
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav')
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.INSTRUMENT)
+            parsed = parse_for_file(out.read_bytes())
+            km = [o for o in parsed['objects'] if o['field0'] == 133][0]
+            # Prefix should be [0x04][sample_index]
+            self.assertEqual(km['data'][0], 0x04)
+            self.assertEqual(km['data'][1], 0)  # Only one sample, index 0
+
+    def test_multi_sample_keymap_prefix(self):
+        with TemporaryDirectory() as tmpdir:
+            wavs = [
+                make_wav(Path(tmpdir) / 'a.wav', root_key=48),
+                make_wav(Path(tmpdir) / 'b.wav', root_key=60),
+                make_wav(Path(tmpdir) / 'c.wav', root_key=72),
+            ]
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz(wavs, out, mode=ConversionMode.INSTRUMENT)
+            parsed = parse_for_file(out.read_bytes())
+            km = [o for o in parsed['objects'] if o['field0'] == 133][0]
+            # Max sample index should be 2 (three samples: 0, 1, 2)
+            self.assertEqual(km['data'][0], 0x04)
+            self.assertEqual(km['data'][1], 2)
+
+    def test_keymap_entry_format(self):
+        """Verify keymap entries use 0x04+index for sample references."""
+        with TemporaryDirectory() as tmpdir:
+            wavs = [
+                make_wav(Path(tmpdir) / 'lo.wav', root_key=48),
+                make_wav(Path(tmpdir) / 'hi.wav', root_key=72),
+            ]
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz(wavs, out, mode=ConversionMode.INSTRUMENT)
+            parsed = parse_for_file(out.read_bytes())
+            km = [o for o in parsed['objects'] if o['field0'] == 133][0]
+            kd = km['data']
+            method = struct.unpack('>h', kd[2:4])[0]
+            entries_per_vel = struct.unpack('>h', kd[8:10])[0]
+            entry_size = struct.unpack('>h', kd[10:12])[0]
+
+            # method=0x03: sample_ref(2) + subsample(1) = 3 bytes
+            self.assertEqual(method, 0x03)
+            self.assertEqual(entry_size, 3)
+
+            # Check entries: all should have 0x04 as first byte of sample ref
+            entry_start = 28
+            for k in range(entries_per_vel + 1):
+                off = entry_start + k * entry_size
+                sample_marker = kd[off]
+                self.assertEqual(sample_marker, 0x04,
+                                 f"Key {k}: expected 0x04 marker, got 0x{sample_marker:02x}")
+
+
+class TestForWriterProgram(unittest.TestCase):
+    """Tests for .for program object serialization."""
+
+    def test_single_layer_program(self):
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav')
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.INSTRUMENT)
+            parsed = parse_for_file(out.read_bytes())
+            progs = [o for o in parsed['objects'] if o['field0'] == 138]
+            self.assertEqual(len(progs), 1)
+            pd = progs[0]['data']
+            self.assertEqual(len(pd), 1380)
+            self.assertEqual(pd[LAYER_COUNT_OFFSET], 1)
+
+    def test_program_keymap_reference(self):
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav')
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.INSTRUMENT)
+            parsed = parse_for_file(out.read_bytes())
+            pd = [o for o in parsed['objects'] if o['field0'] == 138][0]['data']
+            km_id = struct.unpack('>I', pd[L1_CAL_KMID_OFFSET:L1_CAL_KMID_OFFSET+4])[0]
+            km_id2 = struct.unpack('>I', pd[L1_CAL_KMID2_OFFSET:L1_CAL_KMID2_OFFSET+4])[0]
+            # Both should reference keymap 1024
+            self.assertEqual(km_id, 1024)
+            self.assertEqual(km_id2, 1024)
+
+
+class TestForWriterEndToEnd(unittest.TestCase):
+    """End-to-end tests for .for output."""
+
+    def test_samples_only_mode(self):
+        with TemporaryDirectory() as tmpdir:
+            wavs = [
+                make_wav(Path(tmpdir) / 'a.wav'),
+                make_wav(Path(tmpdir) / 'b.wav'),
+            ]
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz(wavs, out, mode=ConversionMode.SAMPLES)
+            parsed = parse_for_file(out.read_bytes())
+            self.assertEqual(parsed['magic'], b'COOL')
+            # Samples only: no programs or keymaps
+            progs = [o for o in parsed['objects'] if o['field0'] == 138]
+            kms = [o for o in parsed['objects'] if o['field0'] == 133]
+            samps = [o for o in parsed['objects'] if o['field0'] == 170]
+            self.assertEqual(len(progs), 0)
+            self.assertEqual(len(kms), 0)
+            self.assertEqual(len(samps), 2)
+
+    def test_instrument_mode(self):
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav')
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.INSTRUMENT)
+            parsed = parse_for_file(out.read_bytes())
+            progs = [o for o in parsed['objects'] if o['field0'] == 138]
+            kms = [o for o in parsed['objects'] if o['field0'] == 133]
+            samps = [o for o in parsed['objects'] if o['field0'] == 170]
+            self.assertEqual(len(progs), 1)
+            self.assertEqual(len(kms), 1)
+            self.assertEqual(len(samps), 1)
+
+    def test_drumset_mode(self):
+        with TemporaryDirectory() as tmpdir:
+            wavs = [
+                make_wav(Path(tmpdir) / 'kick.wav'),
+                make_wav(Path(tmpdir) / 'snare.wav'),
+                make_wav(Path(tmpdir) / 'hat.wav'),
+            ]
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz(wavs, out, mode=ConversionMode.DRUMSET)
+            parsed = parse_for_file(out.read_bytes())
+            progs = [o for o in parsed['objects'] if o['field0'] == 138]
+            kms = [o for o in parsed['objects'] if o['field0'] == 133]
+            samps = [o for o in parsed['objects'] if o['field0'] == 170]
+            self.assertEqual(len(progs), 1)
+            self.assertEqual(len(kms), 1)
+            self.assertEqual(len(samps), 3)
+
+    def test_drumset_multi_mode(self):
+        with TemporaryDirectory() as tmpdir:
+            wavs = [
+                make_wav(Path(tmpdir) / 'kick.wav'),
+                make_wav(Path(tmpdir) / 'snare.wav'),
+            ]
+            entries = [
+                WavEntry(path=wavs[0], root_key=36, lo_key=34, hi_key=36),
+                WavEntry(path=wavs[1], root_key=38, lo_key=37, hi_key=39),
+            ]
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz(
+                wavs, out, mode=ConversionMode.DRUMSET_MULTI,
+                root_keys=[36, 38], key_ranges=[(34, 36), (37, 39)],
+                entries=entries)
+            parsed = parse_for_file(out.read_bytes())
+            progs = [o for o in parsed['objects'] if o['field0'] == 138]
+            kms = [o for o in parsed['objects'] if o['field0'] == 133]
+            samps = [o for o in parsed['objects'] if o['field0'] == 170]
+            self.assertEqual(len(progs), 1)
+            self.assertEqual(len(kms), 2)
+            self.assertEqual(len(samps), 2)
+            # Program should have 2 layers
+            pd = progs[0]['data']
+            self.assertEqual(pd[LAYER_COUNT_OFFSET], 2)
+
+    def test_object_ids_start_at_1024(self):
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav')
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.INSTRUMENT)
+            parsed = parse_for_file(out.read_bytes())
+            for obj in parsed['objects']:
+                self.assertGreaterEqual(obj['id'], 1024)
+
+    def test_object_names_preserved(self):
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'mysample.wav')
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.INSTRUMENT,
+                                name='My Inst')
+            parsed = parse_for_file(out.read_bytes())
+            prog = [o for o in parsed['objects'] if o['field0'] == 138][0]
+            km = [o for o in parsed['objects'] if o['field0'] == 133][0]
+            samp = [o for o in parsed['objects'] if o['field0'] == 170][0]
+            self.assertEqual(prog['name'], 'my inst')
+            self.assertEqual(km['name'], 'my inst')
+            self.assertEqual(samp['name'], 'mysample')
+
+    def test_list_file_for_output(self):
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav')
+            listfile = Path(tmpdir) / 'list.txt'
+            listfile.write_text(f'{wav}\n')
+            out = Path(tmpdir) / 'output.for'
+            convert_from_list_file(listfile, out, mode=ConversionMode.INSTRUMENT)
+            parsed = parse_for_file(out.read_bytes())
+            self.assertEqual(parsed['magic'], b'COOL')
+            self.assertEqual(len(parsed['objects']), 3)
+
+    def test_stereo_instrument(self):
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'stereo.wav', channels=2)
+            out = Path(tmpdir) / 'test.for'
+            convert_wavs_to_krz([wav], out, mode=ConversionMode.INSTRUMENT)
+            parsed = parse_for_file(out.read_bytes())
+            samp = [o for o in parsed['objects'] if o['field0'] == 170][0]
+            stereo = struct.unpack('>H', samp['data'][6:8])[0]
+            self.assertEqual(stereo, 1)
+            self.assertEqual(len(samp['data']), 176)
+
+
+class TestForWriterInstrumentMulti(unittest.TestCase):
+    """Tests for instrument-multi mode .for output with velocity zones."""
+
+    def setUp(self):
+        self.tmpdir = TemporaryDirectory()
+        self.dir = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_instrument_multi_for_output(self):
+        """instrument-multi produces correct .for with vel_zone bytes."""
+        make_wav(self.dir / 'soft.wav')
+        make_wav(self.dir / 'loud.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Piano" instrument-multi\n'
+            '@layer ppp mp\n'
+            'soft.wav C4\n'
+            '@layer mf fff\n'
+            'loud.wav C4\n'
+        )
+        out = self.dir / 'out.for'
+        convert_from_list_file(listfile, out, mode=ConversionMode.INSTRUMENT)
+        parsed = parse_for_file(out.read_bytes())
+        progs = [o for o in parsed['objects'] if o['field0'] == 138]
+        kms = [o for o in parsed['objects'] if o['field0'] == 133]
+        samps = [o for o in parsed['objects'] if o['field0'] == 170]
+        self.assertEqual(len(progs), 1)
+        self.assertEqual(len(kms), 2)
+        self.assertEqual(len(samps), 2)
+        # Program has 2 layers
+        pd = progs[0]['data']
+        self.assertEqual(pd[LAYER_COUNT_OFFSET], 2)
+        # Layer 0 vel_zone: ppp-mp = 4
+        blk0 = LAYER_BLOCK_START
+        self.assertEqual(pd[blk0 + _BLK_VEL_ZONE], 4)
+        # Layer 1 vel_zone: mf-fff = 32
+        blk1 = LAYER_BLOCK_START + LAYER_BLOCK_SIZE
+        self.assertEqual(pd[blk1 + _BLK_VEL_ZONE], 32)
+
+    def test_instrument_multi_four_layers_for(self):
+        """4-layer instrument-multi .for output."""
+        for name in ['pp', 'mp', 'f', 'fff']:
+            make_wav(self.dir / f'{name}.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Vel4" instrument-multi\n'
+            '@layer ppp pp\n'
+            'pp.wav C4\n'
+            '@layer p mp\n'
+            'mp.wav C4\n'
+            '@layer mf f\n'
+            'f.wav C4\n'
+            '@layer ff fff\n'
+            'fff.wav C4\n'
+        )
+        out = self.dir / 'out.for'
+        convert_from_list_file(listfile, out, mode=ConversionMode.INSTRUMENT)
+        parsed = parse_for_file(out.read_bytes())
+        pd = [o for o in parsed['objects'] if o['field0'] == 138][0]['data']
+        self.assertEqual(pd[LAYER_COUNT_OFFSET], 4)
+        expected_vel = [
+            (0 + 1) * 8 - (1 + 1),  # ppp-pp = 6
+            (2 + 1) * 8 - (3 + 1),  # p-mp = 20
+            (4 + 1) * 8 - (5 + 1),  # mf-f = 34
+            (6 + 1) * 8 - (7 + 1),  # ff-fff = 48
+        ]
+        for i, exp in enumerate(expected_vel):
+            blk = LAYER_BLOCK_START + i * LAYER_BLOCK_SIZE
+            self.assertEqual(pd[blk + _BLK_VEL_ZONE], exp)
+
+    def test_instrument_multi_full_keyboard(self):
+        """All layers in instrument-multi have full key range (0-127)."""
+        make_wav(self.dir / 'soft.wav')
+        make_wav(self.dir / 'loud.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Piano" instrument-multi\n'
+            '@layer ppp mp\n'
+            'soft.wav C4\n'
+            '@layer mf fff\n'
+            'loud.wav C4\n'
+        )
+        out = self.dir / 'out.for'
+        convert_from_list_file(listfile, out, mode=ConversionMode.INSTRUMENT)
+        parsed = parse_for_file(out.read_bytes())
+        pd = [o for o in parsed['objects'] if o['field0'] == 138][0]['data']
+        for i in range(2):
+            blk = LAYER_BLOCK_START + i * LAYER_BLOCK_SIZE
+            self.assertEqual(pd[blk + _BLK_LOKEY], 0)
+            self.assertEqual(pd[blk + _BLK_HIKEY], 127)
+
+
+class TestForWriterCLI(unittest.TestCase):
+    """Tests for CLI .for extension handling."""
+
+    def test_cli_accepts_for_extension(self):
+        from wav2krz.cli import main
+        with TemporaryDirectory() as tmpdir:
+            wav = make_wav(Path(tmpdir) / 'test.wav')
+            listfile = Path(tmpdir) / 'list.txt'
+            listfile.write_text(f'{wav}\n')
+            out = Path(tmpdir) / 'output.for'
+            ret = main([str(listfile), str(out), '--mode', 'instrument'])
+            self.assertEqual(ret, 0)
+            self.assertTrue(out.exists())
+            data = out.read_bytes()
+            self.assertEqual(data[:4], b'COOL')
+
+
+class TestForWriterMultiProgram(unittest.TestCase):
+    """Tests for multi-program .for output."""
+
+    def setUp(self):
+        self.tmpdir = TemporaryDirectory()
+        self.dir = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _extract_program_keymap_ids(self, prog_data: bytes) -> list:
+        """Extract keymap IDs from .for program data layer blocks."""
+        layer_count = prog_data[LAYER_COUNT_OFFSET]
+        ids = []
+        for i in range(layer_count):
+            offset = LAYER_BLOCK_START + i * LAYER_BLOCK_SIZE + _BLK_CAL_KMID
+            km_id = struct.unpack('>I', prog_data[offset:offset+4])[0]
+            ids.append(km_id)
+        return ids
+
+    def test_two_instrument_programs(self):
+        make_wav(self.dir / 'piano.wav')
+        make_wav(self.dir / 'strings.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Piano" instrument\npiano.wav C4\n'
+            '@program "Strings" instrument\nstrings.wav C4\n'
+        )
+        out = self.dir / 'out.for'
+        convert_from_list_file(listfile, out, mode=ConversionMode.INSTRUMENT)
+        parsed = parse_for_file(out.read_bytes())
+        progs = [o for o in parsed['objects'] if o['field0'] == 138]
+        kms = [o for o in parsed['objects'] if o['field0'] == 133]
+        samps = [o for o in parsed['objects'] if o['field0'] == 170]
+        self.assertEqual(len(progs), 2)
+        self.assertEqual(len(kms), 2)
+        self.assertEqual(len(samps), 2)
+        # Each program references a distinct keymap
+        km_ids_0 = self._extract_program_keymap_ids(progs[0]['data'])
+        km_ids_1 = self._extract_program_keymap_ids(progs[1]['data'])
+        self.assertEqual(len(km_ids_0), 1)
+        self.assertEqual(len(km_ids_1), 1)
+        self.assertNotEqual(km_ids_0[0], km_ids_1[0])
+        # Each program's keymap ID matches one of the actual keymap objects
+        all_km_ids = {km['id'] for km in kms}
+        self.assertIn(km_ids_0[0], all_km_ids)
+        self.assertIn(km_ids_1[0], all_km_ids)
+
+    def test_drumset_multi_then_instrument(self):
+        for name in ['kick', 'snare', 'piano']:
+            make_wav(self.dir / f'{name}.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Drums" drumset-multi\n'
+            '@group C2\nkick.wav\n'
+            '@group D2\nsnare.wav\n'
+            '@program "Piano" instrument\npiano.wav C4\n'
+        )
+        out = self.dir / 'out.for'
+        convert_from_list_file(listfile, out)
+        parsed = parse_for_file(out.read_bytes())
+        progs = [o for o in parsed['objects'] if o['field0'] == 138]
+        kms = [o for o in parsed['objects'] if o['field0'] == 133]
+        samps = [o for o in parsed['objects'] if o['field0'] == 170]
+        self.assertEqual(len(progs), 2)
+        self.assertEqual(len(kms), 3)  # 2 drum layers + 1 piano
+        self.assertEqual(len(samps), 3)
+        # Drums program has 2 layers with 2 keymap refs
+        drum_km_ids = self._extract_program_keymap_ids(progs[0]['data'])
+        self.assertEqual(len(drum_km_ids), 2)
+        # Piano program has 1 layer with 1 keymap ref
+        piano_km_ids = self._extract_program_keymap_ids(progs[1]['data'])
+        self.assertEqual(len(piano_km_ids), 1)
+        # Piano's keymap is distinct from drum keymaps
+        self.assertNotIn(piano_km_ids[0], drum_km_ids)
+        # All referenced keymap IDs exist in the file
+        all_km_ids = {km['id'] for km in kms}
+        for kid in drum_km_ids + piano_km_ids:
+            self.assertIn(kid, all_km_ids)
+
+    def test_instrument_then_drumset_multi(self):
+        for name in ['piano', 'kick', 'snare']:
+            make_wav(self.dir / f'{name}.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Piano" instrument\npiano.wav C4\n'
+            '@program "Drums" drumset-multi\n'
+            '@group C2\nkick.wav\n'
+            '@group D2\nsnare.wav\n'
+        )
+        out = self.dir / 'out.for'
+        convert_from_list_file(listfile, out)
+        parsed = parse_for_file(out.read_bytes())
+        progs = [o for o in parsed['objects'] if o['field0'] == 138]
+        kms = [o for o in parsed['objects'] if o['field0'] == 133]
+        samps = [o for o in parsed['objects'] if o['field0'] == 170]
+        self.assertEqual(len(progs), 2)
+        self.assertEqual(len(kms), 3)
+        self.assertEqual(len(samps), 3)
+        piano_km_ids = self._extract_program_keymap_ids(progs[0]['data'])
+        drum_km_ids = self._extract_program_keymap_ids(progs[1]['data'])
+        self.assertEqual(len(piano_km_ids), 1)
+        self.assertEqual(len(drum_km_ids), 2)
+        self.assertNotIn(piano_km_ids[0], drum_km_ids)
+
+    def test_two_drumset_multi_programs(self):
+        for name in ['kick', 'snare', 'conga_lo', 'conga_hi']:
+            make_wav(self.dir / f'{name}.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Kit A" drumset-multi\n'
+            '@group C2\nkick.wav\n'
+            '@group D2\nsnare.wav\n'
+            '@program "Kit B" drumset-multi\n'
+            '@group E2\nconga_lo.wav\n'
+            '@group F2\nconga_hi.wav\n'
+        )
+        out = self.dir / 'out.for'
+        convert_from_list_file(listfile, out)
+        parsed = parse_for_file(out.read_bytes())
+        progs = [o for o in parsed['objects'] if o['field0'] == 138]
+        kms = [o for o in parsed['objects'] if o['field0'] == 133]
+        samps = [o for o in parsed['objects'] if o['field0'] == 170]
+        self.assertEqual(len(progs), 2)
+        self.assertEqual(len(kms), 4)  # 2 + 2
+        self.assertEqual(len(samps), 4)
+        kit_a_km_ids = self._extract_program_keymap_ids(progs[0]['data'])
+        kit_b_km_ids = self._extract_program_keymap_ids(progs[1]['data'])
+        self.assertEqual(len(kit_a_km_ids), 2)
+        self.assertEqual(len(kit_b_km_ids), 2)
+        # No overlap between the two programs' keymaps
+        self.assertFalse(set(kit_a_km_ids) & set(kit_b_km_ids))
+
+
+if __name__ == '__main__':
+    unittest.main()
