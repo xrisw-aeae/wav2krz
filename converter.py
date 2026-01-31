@@ -1,6 +1,7 @@
 """Main converter orchestration for wav2krz."""
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -23,6 +24,63 @@ class ConversionMode:
 NOTE_NAMES = {
     'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11
 }
+
+# Velocity zone names to indices (0-7)
+VELOCITY_NAMES = {
+    'PPP': 0, 'PP': 1, 'P': 2, 'MP': 3,
+    'MF': 4, 'F': 5, 'FF': 6, 'FFF': 7
+}
+
+
+@dataclass
+class WavEntry:
+    """A parsed entry from the wav list file."""
+    path: Path
+    root_key: Optional[int] = None
+    vel_range: Optional[Tuple[int, int]] = None  # (start_zone, end_zone) 0-7
+
+
+def parse_velocity_range(spec: str) -> Optional[Tuple[int, int]]:
+    """
+    Parse a velocity range specification.
+
+    Supports:
+        v1-3        Numeric zones (1-8 mapped to indices 0-7)
+        v5          Single numeric zone
+        ppp-p       Named range
+        mf          Single named zone
+        ppp-fff     Full range
+
+    Args:
+        spec: Velocity range string
+
+    Returns:
+        (start_zone, end_zone) tuple with 0-7 indices, or None if invalid
+    """
+    spec = spec.strip()
+
+    # Try numeric format: v1-3 or v5
+    match = re.match(r'^[vV](\d+)(?:-(\d+))?$', spec)
+    if match:
+        start = int(match.group(1)) - 1  # Convert 1-8 to 0-7
+        end = int(match.group(2)) - 1 if match.group(2) else start
+        if 0 <= start <= 7 and 0 <= end <= 7 and start <= end:
+            return (start, end)
+        return None
+
+    # Try named format: ppp-p or mf
+    parts = spec.upper().split('-')
+    if len(parts) == 1:
+        idx = VELOCITY_NAMES.get(parts[0])
+        if idx is not None:
+            return (idx, idx)
+    elif len(parts) == 2:
+        start_idx = VELOCITY_NAMES.get(parts[0])
+        end_idx = VELOCITY_NAMES.get(parts[1])
+        if start_idx is not None and end_idx is not None and start_idx <= end_idx:
+            return (start_idx, end_idx)
+
+    return None
 
 
 def parse_note_name(note: str) -> Optional[int]:
@@ -73,21 +131,23 @@ def parse_note_name(note: str) -> Optional[int]:
     return None
 
 
-def read_wav_list(list_file: Path) -> List[Tuple[Path, Optional[int]]]:
+def read_wav_list(list_file: Path) -> List[WavEntry]:
     """
-    Read list of WAV file paths and optional root keys from a text file.
+    Read list of WAV file paths with optional root keys and velocity ranges.
 
     File format (one entry per line):
-        filename.wav           # Uses default root key (60) or WAV metadata
-        filename.wav 48        # Specifies root key as MIDI number
-        filename.wav C4        # Specifies root key as note name
+        filename.wav                    # Defaults for everything
+        filename.wav C4                 # Root key only
+        filename.wav C4 v1-3            # Root key + velocity range (numeric)
+        filename.wav C4 ppp-p           # Root key + velocity range (named)
+        filename.wav C4 mf              # Root key + single velocity zone
         # This is a comment
 
     Args:
         list_file: Path to text file
 
     Returns:
-        List of (Path, root_key) tuples. root_key is None if not specified.
+        List of WavEntry objects.
     """
     entries = []
     with open(list_file, 'r') as f:
@@ -96,7 +156,7 @@ def read_wav_list(list_file: Path) -> List[Tuple[Path, Optional[int]]]:
             if not line or line.startswith('#'):
                 continue
 
-            # Split line into parts (filename and optional root key)
+            # Split line into parts
             parts = line.split()
             if not parts:
                 continue
@@ -106,16 +166,28 @@ def read_wav_list(list_file: Path) -> List[Tuple[Path, Optional[int]]]:
             if not wav_path.is_absolute():
                 wav_path = list_file.parent / wav_path
 
-            root_key = None
-            if len(parts) >= 2:
-                root_key = parse_note_name(parts[1])
-                if root_key is None:
-                    raise Wav2KrzError(
-                        f"Invalid root key '{parts[1]}' on line {line_num}. "
-                        f"Use MIDI number (0-127) or note name (C4, F#3, etc.)"
-                    )
+            entry = WavEntry(path=wav_path)
 
-            entries.append((wav_path, root_key))
+            # Parse remaining columns (root key and/or velocity range)
+            for part in parts[1:]:
+                # Try velocity range first
+                vel = parse_velocity_range(part)
+                if vel is not None:
+                    entry.vel_range = vel
+                    continue
+
+                # Try root key
+                rk = parse_note_name(part)
+                if rk is not None:
+                    entry.root_key = rk
+                    continue
+
+                raise Wav2KrzError(
+                    f"Unknown parameter '{part}' on line {line_num}. "
+                    f"Expected root key (C4, 60) or velocity range (v1-3, ppp-p)."
+                )
+
+            entries.append(entry)
 
     return entries
 
@@ -128,7 +200,8 @@ def convert_wavs_to_krz(
     start_id: int = 200,
     name: Optional[str] = None,
     root_key: Optional[int] = None,
-    root_keys: Optional[List[Optional[int]]] = None
+    root_keys: Optional[List[Optional[int]]] = None,
+    vel_ranges: Optional[List[Optional[Tuple[int, int]]]] = None
 ) -> None:
     """
     Convert WAV files to Kurzweil .krz format.
@@ -143,6 +216,8 @@ def convert_wavs_to_krz(
         root_key: Global root key override for all samples (default: None)
         root_keys: Per-sample root keys (default: None). If provided, must match
                    length of wav_files. None entries use default or WAV metadata.
+        vel_ranges: Per-sample velocity ranges as (start_zone, end_zone) tuples.
+                    Zones are 0-7 mapping to ppp through fff.
 
     Raises:
         Wav2KrzError: On conversion errors
@@ -152,6 +227,7 @@ def convert_wavs_to_krz(
 
     writer = KrzWriter()
     samples: List[KSample] = []
+    sample_vel_ranges: List[Optional[Tuple[int, int]]] = []
 
     # Parse all WAV files and create samples
     sample_id = start_id
@@ -169,18 +245,14 @@ def convert_wavs_to_krz(
 
         # Determine root key (priority: global override > per-sample > drumset position > WAV metadata > default)
         if root_key is not None:
-            # Global override
             sample_root_key = root_key
         elif root_keys is not None and i < len(root_keys) and root_keys[i] is not None:
-            # Per-sample root key from list file
             sample_root_key = root_keys[i]
         elif mode == ConversionMode.DRUMSET:
-            # For drumset mode, set root key to the assigned MIDI key
             sample_root_key = start_key + len(samples)
             if sample_root_key > 127:
                 sample_root_key = 127
         else:
-            # Default: 60 (C4), or from WAV smpl chunk (handled in create_sample_from_wav)
             sample_root_key = 60
 
         sample = create_sample_from_wav(wav_data, sample_name, sample_id, sample_root_key)
@@ -188,25 +260,57 @@ def convert_wavs_to_krz(
         writer.add_sample(sample)
         sample_id += 1
 
+        # Track velocity range for this sample
+        vr = None
+        if vel_ranges is not None and i < len(vel_ranges):
+            vr = vel_ranges[i]
+        sample_vel_ranges.append(vr)
+
     # Create keymap and program based on mode
     if mode in (ConversionMode.INSTRUMENT, ConversionMode.DRUMSET):
         base_name = name if name else output_path.stem[:16]
         keymap_id = start_id
         program_id = start_id
 
-        # Check if any samples are stereo
         has_stereo = any(s.is_stereo() for s in samples)
 
+        # Build velocity layer grouping if any velocity ranges are specified
+        has_vel_layers = any(vr is not None for vr in sample_vel_ranges)
+        vel_layer_map = None
+
+        if has_vel_layers:
+            # Group: {(start, end): [sample_indices...]}
+            vel_layer_map = {}
+            for idx, vr in enumerate(sample_vel_ranges):
+                if vr is None:
+                    vr = (0, 7)  # Default: all zones
+                vel_layer_map.setdefault(vr, []).append(idx)
+
         if mode == ConversionMode.INSTRUMENT:
-            # Use all samples for instrument mode - each placed at its root key
-            keymap = create_instrument_keymap(samples, keymap_id, base_name)
+            keymap = create_instrument_keymap(
+                samples, keymap_id, base_name, vel_layer_map=vel_layer_map)
         else:
-            # Drumset: map each sample to consecutive keys
-            keymap = create_drumset_keymap(samples, keymap_id, base_name, start_key)
+            # In drumset mode, root_keys from the list file specify key positions.
+            # Build key_assignments: explicit key per sample, or None for consecutive.
+            drum_key_assignments = None
+            if root_keys is not None and any(rk is not None for rk in root_keys):
+                # Assign explicit keys where provided, fill gaps with consecutive keys
+                next_auto_key = start_key
+                drum_key_assignments = []
+                for rk in root_keys:
+                    if rk is not None:
+                        drum_key_assignments.append(rk)
+                    else:
+                        drum_key_assignments.append(next_auto_key)
+                        next_auto_key += 1
+
+            keymap = create_drumset_keymap(
+                samples, keymap_id, base_name, start_key,
+                vel_layer_map=vel_layer_map,
+                key_assignments=drum_key_assignments)
 
         writer.add_keymap(keymap)
 
-        # Create program referencing the keymap
         program = create_program(keymap, program_id, base_name, has_stereo)
         writer.add_program(program)
 
@@ -227,7 +331,7 @@ def convert_from_list_file(
     Convert WAV files listed in a text file to .krz format.
 
     Args:
-        list_file: Path to text file with WAV paths and optional root keys
+        list_file: Path to text file with WAV paths, root keys, velocity ranges
         output_path: Output .krz file path
         mode: Conversion mode
         start_key: Starting MIDI key for drumset mode
@@ -236,10 +340,11 @@ def convert_from_list_file(
         root_key: Global root key override (overrides per-sample keys from file)
     """
     entries = read_wav_list(list_file)
-    wav_files = [path for path, _ in entries]
-    root_keys = [rk for _, rk in entries]
+    wav_files = [e.path for e in entries]
+    root_keys = [e.root_key for e in entries]
+    vel_ranges = [e.vel_range for e in entries]
 
     convert_wavs_to_krz(
         wav_files, output_path, mode, start_key, start_id, name,
-        root_key=root_key, root_keys=root_keys
+        root_key=root_key, root_keys=root_keys, vel_ranges=vel_ranges
     )

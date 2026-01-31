@@ -372,7 +372,6 @@ def _create_soundfilehead(wav_data: 'WavFile', num_samples: int,
     """Create a Soundfilehead with proper settings."""
     sh = Soundfilehead()
     sh.sample_period = sample_period
-    sh.flags = 0x70  # Loop on, needs load, RAM based
     sh.set_root_key(root_key)
 
     sh.sample_start = 0
@@ -380,9 +379,11 @@ def _create_soundfilehead(wav_data: 'WavFile', num_samples: int,
 
     # Check for loop info from WAV smpl chunk
     if wav_data.sample_info and wav_data.sample_info.is_looped:
+        sh.flags = 0x70  # Loop on, needs load, RAM based
         sh.sample_end = wav_data.sample_info.loop_end
         sh.sample_loop_start = wav_data.sample_info.loop_start
     else:
+        sh.flags = 0xF0  # Loop off (0x80), needs load, RAM based
         sh.sample_end = num_samples - 1
         sh.sample_loop_start = sh.sample_end
 

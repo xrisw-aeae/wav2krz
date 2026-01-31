@@ -318,7 +318,99 @@ class KKeymap:
         f.seek(end_pos)
 
 
-def create_instrument_keymap(samples: List[KSample] | KSample, keymap_id: int, name: str) -> KKeymap:
+def _populate_instrument_vl(vl: VeloLevel, sample_list: List[KSample]) -> None:
+    """Place samples in a velocity level at their root key positions, then fill gaps."""
+    for sample in sample_list:
+        for header_idx in range(len(sample.headers)):
+            if sample.is_stereo() and header_idx % 2 == 1:
+                continue
+            root_key = sample.headers[header_idx].rootkey
+            key_position = root_key - 12
+            key_position = max(0, min(127, key_position))
+            vl.set_sample_at_root(sample, header_idx, key_position)
+    vl.fill_spaces_between_samples()
+
+
+def _populate_drumset_vl(vl: VeloLevel, sample_list: List[KSample],
+                         start_key: int,
+                         key_assignments: List[int] = None) -> None:
+    """Place samples on assigned keys (or consecutive keys from start_key), then fill gaps."""
+    for i, sample in enumerate(sample_list):
+        if key_assignments is not None and i < len(key_assignments):
+            key = key_assignments[i]
+        else:
+            key = start_key + i
+        if 0 <= key < 128:
+            vl.set_sample_at_root(sample, 0, key)
+    vl.fill_spaces_between_samples()
+
+
+def _setup_velocity_layers(
+    km: KKeymap,
+    samples: List[KSample],
+    vel_layer_map: dict,
+    populate_fn,
+    key_assignments: List[int] = None,
+    **populate_kwargs
+) -> None:
+    """
+    Create velocity levels and assign them to velocity zones.
+
+    Args:
+        km: KKeymap to configure
+        samples: Full list of samples
+        vel_layer_map: {(start_zone, end_zone): [sample_indices...]}
+        populate_fn: Function to populate each VeloLevel
+        key_assignments: Optional per-sample key positions (indexed by
+                         original sample index). Remapped per velocity group.
+        **populate_kwargs: Extra kwargs passed to populate_fn
+    """
+    # Sort layers by start zone for consistent ordering
+    sorted_layers = sorted(vel_layer_map.keys())
+
+    # Create a VeloLevel for each layer
+    layer_vl = {}
+    for vel_range in sorted_layers:
+        sample_indices = vel_layer_map[vel_range]
+        layer_samples = [samples[i] for i in sample_indices]
+
+        # Remap key_assignments for this subset of samples
+        layer_kwargs = dict(populate_kwargs)
+        if key_assignments is not None:
+            layer_keys = [key_assignments[i] for i in sample_indices]
+            layer_kwargs['key_assignments'] = layer_keys
+
+        vl = km.new_level()
+        populate_fn(vl, layer_samples, **layer_kwargs)
+        layer_vl[vel_range] = vl
+
+    # Assign velocity zones (0-7) to velocity levels
+    km.velocity_mapping = [0] * 8
+    for vel_range, vl in layer_vl.items():
+        start_zone, end_zone = vel_range
+        for zone in range(start_zone, end_zone + 1):
+            km.velocity_mapping[zone] = vl.get_rang()
+
+    # Fill any unassigned zones with the nearest assigned level
+    # (find the closest assigned zone for each unassigned one)
+    assigned = set()
+    for vel_range in layer_vl:
+        for z in range(vel_range[0], vel_range[1] + 1):
+            assigned.add(z)
+
+    for zone in range(8):
+        if zone not in assigned:
+            # Find nearest assigned zone
+            best = min(assigned, key=lambda a: abs(a - zone))
+            km.velocity_mapping[zone] = km.velocity_mapping[best]
+
+
+def create_instrument_keymap(
+    samples: List[KSample] | KSample,
+    keymap_id: int,
+    name: str,
+    vel_layer_map: dict = None
+) -> KKeymap:
     """
     Create a keymap for instrument mode (samples pitched across keyboard).
 
@@ -329,11 +421,12 @@ def create_instrument_keymap(samples: List[KSample] | KSample, keymap_id: int, n
         samples: KSample or list of KSamples to map
         keymap_id: Keymap ID number
         name: Keymap name
+        vel_layer_map: Optional velocity layer mapping
+                       {(start_zone, end_zone): [sample_indices...]}
 
     Returns:
         KKeymap configured for instrument use
     """
-    # Handle single sample for backwards compatibility
     if isinstance(samples, KSample):
         samples = [samples]
 
@@ -342,44 +435,30 @@ def create_instrument_keymap(samples: List[KSample] | KSample, keymap_id: int, n
     km.set_hash(KHash.generate(keymap_id, KHash.T_KEYMAP))
 
     # Method: 0x03 = sample ID (0x02) + subsample (0x01) = 3 bytes/entry
-    # Tuning is calculated automatically by Kurzweil using centsPerEntry
     km.method = 0x03
     km.entry_size = method_to_size(km.method)
     km.entries_per_vel = 127
     km.cents_per_entry = 100
 
-    # Create single velocity level
-    vl = km.new_level()
-
-    # Place each sample at its root key position (root key - 12 as in Java code)
-    for sample in samples:
-        # Iterate over all headers (for stereo, headers 0 and 1 share same root)
-        for header_idx in range(len(sample.headers)):
-            # For stereo samples, only use even indices (0, 2, 4...)
-            # since odd indices are the right channel of the same sample
-            if sample.is_stereo() and header_idx % 2 == 1:
-                continue
-
-            root_key = sample.headers[header_idx].rootkey
-            key_position = root_key - 12
-            if key_position < 0:
-                key_position = 0
-            if key_position > 127:
-                key_position = 127
-
-            vl.set_sample_at_root(sample, header_idx, key_position)
-
-    # Fill entire keyboard by extending samples to cover gaps
-    vl.fill_spaces_between_samples()
-
-    # All velocities use the same level
-    km.velocity_mapping = [0] * 8
+    if vel_layer_map and len(vel_layer_map) > 1:
+        _setup_velocity_layers(
+            km, samples, vel_layer_map, _populate_instrument_vl)
+    else:
+        vl = km.new_level()
+        _populate_instrument_vl(vl, samples)
+        km.velocity_mapping = [0] * 8
 
     return km
 
 
-def create_drumset_keymap(samples: List[KSample], keymap_id: int, name: str,
-                          start_key: int = 36) -> KKeymap:
+def create_drumset_keymap(
+    samples: List[KSample],
+    keymap_id: int,
+    name: str,
+    start_key: int = 36,
+    vel_layer_map: dict = None,
+    key_assignments: List[int] = None
+) -> KKeymap:
     """
     Create a keymap for drumset mode (each sample on a different key).
 
@@ -387,7 +466,12 @@ def create_drumset_keymap(samples: List[KSample], keymap_id: int, name: str,
         samples: List of KSamples to map
         keymap_id: Keymap ID number
         name: Keymap name
-        start_key: First MIDI key to use (default 36 = C1)
+        start_key: First MIDI key to use (default 36 = C2)
+        vel_layer_map: Optional velocity layer mapping
+                       {(start_zone, end_zone): [sample_indices...]}
+        key_assignments: Optional per-sample key positions (MIDI note numbers).
+                         Must match length of samples. None entries fall back
+                         to consecutive start_key assignment.
 
     Returns:
         KKeymap configured for drumset use
@@ -402,20 +486,14 @@ def create_drumset_keymap(samples: List[KSample], keymap_id: int, name: str,
     km.entries_per_vel = 127
     km.cents_per_entry = 100
 
-    # Create single velocity level
-    vl = km.new_level()
-
-    # Map each sample to consecutive keys
-    for i, sample in enumerate(samples):
-        key = start_key + i
-        if key < 128:
-            # Use set_sample_at_root so each sample plays at its original pitch
-            vl.set_sample_at_root(sample, 0, key)
-
-    # Fill gaps
-    vl.fill_spaces_between_samples()
-
-    # All velocities use the same level
-    km.velocity_mapping = [0] * 8
+    if vel_layer_map and len(vel_layer_map) > 1:
+        _setup_velocity_layers(
+            km, samples, vel_layer_map, _populate_drumset_vl,
+            start_key=start_key, key_assignments=key_assignments)
+    else:
+        vl = km.new_level()
+        _populate_drumset_vl(vl, samples, start_key,
+                             key_assignments=key_assignments)
+        km.velocity_mapping = [0] * 8
 
     return km
