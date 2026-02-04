@@ -212,7 +212,7 @@ wav2krz was developed as a standalone Python reimplementation of parts of the Ja
 
 ## Future Improvements
 
-1. **Loop points from WAV metadata** - Honor `smpl` chunk loop data more thoroughly; edge cases may remain
+1. ~~**Loop points from WAV metadata**~~ - Done. Loop points from `smpl` chunks are validated (bounds-clamped), sampledata is truncated to match `sample_end`, and multi-sample offset alignment is correct.
 2. **Per-sample lokey/hikey attributes** - Add optional low/high key columns to list file for explicit keyboard range control instead of relying on the fill algorithm
 3. **Multi-layer drumset mode** - Each drum sample gets its own keymap and layer (up to 32 layers) within a single program, using the Kurzweil layer architecture
 4. **Multiple programs per .krz file** - Support defining and writing several instruments/drumsets into a single output file

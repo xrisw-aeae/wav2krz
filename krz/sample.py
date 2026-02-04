@@ -95,9 +95,7 @@ class Soundfilehead:
     def write_sampledata(self, f: BinaryIO) -> None:
         """Write sample data to file."""
         if self.needs_load() and self.sampledata:
-            # Write up to sample_end + 1 samples (2 bytes each)
-            num_bytes = (self.sample_end + 1) * 2
-            f.write(self.sampledata[:num_bytes])
+            f.write(self.sampledata)
 
     def prewrite(self, offset: int) -> int:
         """
@@ -314,6 +312,7 @@ def create_sample_from_wav(wav_data: 'WavFile', name: str, sample_id: int,
         num_samples = len(wav_data.data) // 2
         sh = _create_soundfilehead(wav_data, num_samples, sample_period, root_key)
         sh.sampledata = swap_bytes(wav_data.data)
+        _truncate_sampledata(sh)
         ks.insert_header(sh)
         ks.flags = 0  # mono
 
@@ -329,6 +328,7 @@ def create_sample_from_wav(wav_data: 'WavFile', name: str, sample_id: int,
             converted[i * 2] = wav_data.data[i] ^ 0x80
             converted[i * 2 + 1] = 0
         sh.sampledata = bytes(converted)
+        _truncate_sampledata(sh)
         ks.insert_header(sh)
         ks.flags = 0  # mono
 
@@ -345,6 +345,7 @@ def create_sample_from_wav(wav_data: 'WavFile', name: str, sample_id: int,
             left_data[i] = swapped[i * 2]
             left_data[i + 1] = swapped[i * 2 + 1]
         sh_left.sampledata = bytes(left_data)
+        _truncate_sampledata(sh_left)
         ks.insert_header(sh_left)
 
         # Right channel
@@ -354,6 +355,7 @@ def create_sample_from_wav(wav_data: 'WavFile', name: str, sample_id: int,
             right_data[i] = swapped[i * 2 + 2]
             right_data[i + 1] = swapped[i * 2 + 3]
         sh_right.sampledata = bytes(right_data)
+        _truncate_sampledata(sh_right)
         ks.insert_header(sh_right)
 
         ks.flags = 1  # stereo
@@ -365,6 +367,14 @@ def create_sample_from_wav(wav_data: 'WavFile', name: str, sample_id: int,
     ks.ks2 = 0
 
     return ks
+
+
+def _truncate_sampledata(sh: Soundfilehead) -> None:
+    """Truncate sampledata to match sample_end so written size is exact."""
+    if sh.sampledata is not None:
+        max_bytes = (sh.sample_end + 1) * 2
+        if len(sh.sampledata) > max_bytes:
+            sh.sampledata = sh.sampledata[:max_bytes]
 
 
 def _create_soundfilehead(wav_data: 'WavFile', num_samples: int,
@@ -379,9 +389,17 @@ def _create_soundfilehead(wav_data: 'WavFile', num_samples: int,
 
     # Check for loop info from WAV smpl chunk
     if wav_data.sample_info and wav_data.sample_info.is_looped:
-        sh.flags = 0x70  # Loop on, needs load, RAM based
-        sh.sample_end = wav_data.sample_info.loop_end
-        sh.sample_loop_start = wav_data.sample_info.loop_start
+        loop_end = min(wav_data.sample_info.loop_end, num_samples - 1)
+        loop_start = min(wav_data.sample_info.loop_start, loop_end)
+        if loop_start >= loop_end:
+            # Degenerate loop region -- treat as unlooped
+            sh.flags = 0xF0
+            sh.sample_end = num_samples - 1
+            sh.sample_loop_start = sh.sample_end
+        else:
+            sh.flags = 0x70  # Loop on, needs load, RAM based
+            sh.sample_end = loop_end
+            sh.sample_loop_start = loop_start
     else:
         sh.flags = 0xF0  # Loop off (0x80), needs load, RAM based
         sh.sample_end = num_samples - 1

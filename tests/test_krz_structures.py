@@ -203,6 +203,61 @@ class TestCreateSampleFromWav(unittest.TestCase):
         self.assertEqual(ks.headers[0].sample_loop_start, 10)
         self.assertEqual(ks.headers[0].sample_end, 90)
 
+    def test_loop_clamp_end_beyond_data(self):
+        """loop_end past actual sample count is clamped."""
+        info = SampleInfo(root_key=60, is_looped=True,
+                          loop_start=10, loop_end=500)
+        wav = WavFile(channels=1, sample_rate=44100, bits_per_sample=16,
+                      data=b'\x00\x01' * 100, sample_info=info)  # 100 frames
+        ks = create_sample_from_wav(wav, 'test', 200)
+        self.assertTrue(ks.headers[0].is_looped())
+        self.assertEqual(ks.headers[0].sample_end, 99)
+        self.assertEqual(ks.headers[0].sample_loop_start, 10)
+
+    def test_loop_clamp_start_beyond_end(self):
+        """loop_start >= loop_end disables the loop."""
+        info = SampleInfo(root_key=60, is_looped=True,
+                          loop_start=90, loop_end=50)
+        wav = WavFile(channels=1, sample_rate=44100, bits_per_sample=16,
+                      data=b'\x00\x01' * 100, sample_info=info)
+        ks = create_sample_from_wav(wav, 'test', 200)
+        self.assertFalse(ks.headers[0].is_looped())
+        self.assertEqual(ks.headers[0].sample_end, 99)
+
+    def test_looped_sample_data_truncated(self):
+        """sampledata is truncated to match loop_end."""
+        info = SampleInfo(root_key=60, is_looped=True,
+                          loop_start=10, loop_end=49)
+        wav = WavFile(channels=1, sample_rate=44100, bits_per_sample=16,
+                      data=b'\x00\x01' * 100, sample_info=info)  # 100 frames
+        ks = create_sample_from_wav(wav, 'test', 200)
+        # sampledata should be (49 + 1) * 2 = 100 bytes, not 200
+        self.assertEqual(len(ks.headers[0].sampledata), 100)
+
+    def test_multiple_looped_samples_offsets(self):
+        """Two looped samples with post-loop data get correct prewrite offsets."""
+        info_a = SampleInfo(root_key=60, is_looped=True,
+                            loop_start=10, loop_end=49)
+        wav_a = WavFile(channels=1, sample_rate=44100, bits_per_sample=16,
+                        data=b'\x00\x01' * 100, sample_info=info_a)
+        ks_a = create_sample_from_wav(wav_a, 'a', 200)
+
+        info_b = SampleInfo(root_key=60, is_looped=True,
+                            loop_start=5, loop_end=29)
+        wav_b = WavFile(channels=1, sample_rate=44100, bits_per_sample=16,
+                        data=b'\x00\x01' * 80, sample_info=info_b)
+        ks_b = create_sample_from_wav(wav_b, 'b', 201)
+
+        # A: 50 frames of data, B: 30 frames of data
+        self.assertEqual(len(ks_a.headers[0].sampledata), 100)  # 50 * 2
+        self.assertEqual(len(ks_b.headers[0].sampledata), 60)   # 30 * 2
+
+        # prewrite: A gets offset 0, returns 100; B gets offset 100, returns 160
+        offset = ks_a.headers[0].prewrite(0)
+        self.assertEqual(offset, 100)
+        offset = ks_b.headers[0].prewrite(offset)
+        self.assertEqual(offset, 160)
+
     def test_root_key_from_smpl(self):
         info = SampleInfo(root_key=48)
         wav = WavFile(channels=1, sample_rate=44100, bits_per_sample=16,
