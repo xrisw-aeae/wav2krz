@@ -42,13 +42,12 @@ class KrzWriter:
         """
         Get all objects sorted by hash for writing.
 
-        Order: Samples, Keymaps, Programs (by hash within each type).
+        Objects are sorted globally by hash value in DESCENDING order:
+        Samples (type 38) → Keymaps (type 37) → Programs (type 36)
+        This matches the order seen in Kurzweil-native .krz files.
         """
-        objects = []
-        objects.extend(sorted(self.samples, key=lambda x: x.get_hash()))
-        objects.extend(sorted(self.keymaps, key=lambda x: x.get_hash()))
-        objects.extend(sorted(self.programs, key=lambda x: x.get_hash()))
-        return objects
+        objects = self.samples + self.keymaps + self.programs
+        return sorted(objects, key=lambda x: x.get_hash(), reverse=True)
 
     def _prewrite_samples(self) -> None:
         """Prepare sample data offsets before writing."""
