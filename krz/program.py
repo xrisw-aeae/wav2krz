@@ -92,10 +92,14 @@ class KProgram:
         """Get object hash."""
         return self.hash_val
 
-    def make_pgm_block(self) -> None:
-        """Create the main program segment."""
+    def make_pgm_block(self, mode: int = 2) -> None:
+        """Create the main program segment.
+
+        Args:
+            mode: Program mode (2=K2000, 3=K2500, 4=K2600)
+        """
         s = Segment(Segment.PGMSEGTAG)
-        s.data[0] = 2  # Mode
+        s.data[0] = mode
         s.data[1] = 0  # numLayers
         s.data[3] = 0x37  # Bend range
         s.data[4] = 64  # Portamento
@@ -302,7 +306,7 @@ class KProgram:
 
 
 def create_program(keymap: KKeymap, program_id: int, name: str,
-                   stereo: bool = False) -> KProgram:
+                   stereo: bool = False, mode: int = 2) -> KProgram:
     """
     Create a simple program with one layer.
 
@@ -311,6 +315,7 @@ def create_program(keymap: KKeymap, program_id: int, name: str,
         program_id: Program ID number
         name: Program name
         stereo: Whether the samples are stereo
+        mode: Program mode (2=K2000, 3=K2500, 4=K2600)
 
     Returns:
         KProgram ready for writing
@@ -319,7 +324,7 @@ def create_program(keymap: KKeymap, program_id: int, name: str,
     prog.set_name(name.lower()[:16])
     prog.set_hash(KHash.generate(program_id, KHash.T_PROGRAM))
 
-    prog.make_pgm_block()
+    prog.make_pgm_block(mode)
     prog.add_layer(keymap, stereo)
 
     return prog

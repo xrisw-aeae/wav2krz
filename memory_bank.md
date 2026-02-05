@@ -217,3 +217,4 @@ wav2krz was developed as a standalone Python reimplementation of parts of the Ja
 3. **Multi-layer drumset mode** - Each drum sample gets its own keymap and layer (up to 32 layers) within a single program, using the Kurzweil layer architecture
 4. **Multiple programs per .krz file** - Support defining and writing several instruments/drumsets into a single output file
 5. **.for format output** (backburner) - Support Kurzweil Forte/PC3 native format (`COOL` magic) as an output option; requires reverse-engineering the object framing
+6. **Compact keymap / sample merging** (backburner) - Merge individual samples into a single multi-subsample object, then strip per-entry sample IDs from the keymap (saves ~256 bytes per velocity level). Matches KurzFiler's `compactKeymap()` behavior.

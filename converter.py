@@ -10,6 +10,13 @@ from .krz.writer import KrzWriter
 from .krz.sample import create_sample_from_wav, KSample
 from .krz.keymap import create_instrument_keymap, create_drumset_keymap, KKeymap
 from .krz.program import create_program, KProgram
+
+# Output extension to program mode mapping
+FORMAT_MODES = {
+    '.krz': 2,  # K2000
+    '.k25': 3,  # K2500
+    '.k26': 4,  # K2600
+}
 from .exceptions import Wav2KrzError
 
 
@@ -311,7 +318,8 @@ def convert_wavs_to_krz(
 
         writer.add_keymap(keymap)
 
-        program = create_program(keymap, program_id, base_name, has_stereo)
+        pgm_mode = FORMAT_MODES.get(output_path.suffix.lower(), 2)
+        program = create_program(keymap, program_id, base_name, has_stereo, mode=pgm_mode)
         writer.add_program(program)
 
     # Write the .krz file
