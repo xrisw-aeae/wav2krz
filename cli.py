@@ -63,8 +63,8 @@ Examples:
     parser.add_argument(
         '--mode', '-m',
         choices=['samples', 'instrument', 'drumset'],
-        default='samples',
-        help='Conversion mode (default: samples)'
+        default='instrument',
+        help='Conversion mode (default: instrument)'
     )
 
     # Drumset options
