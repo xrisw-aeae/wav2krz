@@ -294,5 +294,101 @@ class TestDrumsetKeymap(unittest.TestCase):
         self.assertEqual(loud_vl.entries[38].sample_id, 203)
 
 
+class TestInstrumentKeymapExplicitRange(unittest.TestCase):
+    """Test that samples with explicit lokey/hikey stay within their range."""
+
+    def test_single_sample_explicit_range(self):
+        """Sample with explicit range only fills that range."""
+        sample = _make_sample(200, root_key=60)  # C4
+        key_ranges = [(48, 72)]  # C3 to C5
+        km = create_instrument_keymap(sample, 200, 'test', key_ranges=key_ranges)
+        vl = km.velocity_levels[0]
+
+        # Keys within range should be filled
+        for k in range(48, 73):
+            self.assertTrue(vl.entries[k].is_used(),
+                            f"Key {k} should be used")
+            self.assertEqual(vl.entries[k].sample_id, 200)
+
+        # Keys outside range should NOT be filled
+        self.assertFalse(vl.entries[47].is_used())
+        self.assertFalse(vl.entries[73].is_used())
+
+    def test_two_samples_explicit_ranges_no_overlap(self):
+        """Two samples with non-overlapping explicit ranges stay separate."""
+        samples = [
+            _make_sample(200, root_key=36),  # C2
+            _make_sample(201, root_key=84),  # C6
+        ]
+        key_ranges = [
+            (24, 47),   # Sample 0: C1 to B2
+            (72, 96),   # Sample 1: C5 to C7
+        ]
+        km = create_instrument_keymap(samples, 200, 'test', key_ranges=key_ranges)
+        vl = km.velocity_levels[0]
+
+        # Sample 200 should cover its explicit range only
+        for k in range(24, 48):
+            self.assertEqual(vl.entries[k].sample_id, 200,
+                             f"Key {k} should be sample 200")
+
+        # Sample 201 should cover its explicit range only
+        for k in range(72, 97):
+            self.assertEqual(vl.entries[k].sample_id, 201,
+                             f"Key {k} should be sample 201")
+
+        # Gap between ranges should NOT be filled (both have explicit ranges)
+        for k in range(48, 72):
+            self.assertFalse(vl.entries[k].is_used(),
+                             f"Key {k} should NOT be filled")
+
+    def test_mixed_explicit_and_none_uses_standard_fill(self):
+        """When some samples lack explicit ranges, standard fill is used for all."""
+        samples = [
+            _make_sample(200, root_key=36),  # C2
+            _make_sample(201, root_key=60),  # C4 - no range
+            _make_sample(202, root_key=84),  # C6
+        ]
+        key_ranges = [
+            (24, 47),   # Sample 0 has explicit range
+            None,       # Sample 1 has no range
+            (84, 108),  # Sample 2 has explicit range
+        ]
+        km = create_instrument_keymap(samples, 200, 'test', key_ranges=key_ranges)
+        vl = km.velocity_levels[0]
+
+        # Since one sample lacks explicit range, standard fill is used
+        # All keys should be filled
+        for k in range(128):
+            self.assertTrue(vl.entries[k].is_used(),
+                            f"Key {k} should be filled with standard fill")
+
+
+class TestDrumsetKeymapExplicitRange(unittest.TestCase):
+    """Test that drumset samples with explicit lokey/hikey stay within their range."""
+
+    def test_drumset_explicit_range(self):
+        """Drumset sample with explicit range only fills that range."""
+        samples = [
+            _make_sample(200, root_key=36),
+            _make_sample(201, root_key=38),
+        ]
+        key_ranges = [
+            (36, 37),  # Sample 0: C2 to C#2
+            (38, 39),  # Sample 1: D2 to D#2
+        ]
+        km = create_drumset_keymap(samples, 200, 'drums', start_key=36,
+                                   key_assignments=[36, 38], key_ranges=key_ranges)
+        vl = km.velocity_levels[0]
+
+        # Sample 200 should be at keys 36-37
+        self.assertEqual(vl.entries[36].sample_id, 200)
+        self.assertEqual(vl.entries[37].sample_id, 200)
+
+        # Sample 201 should be at keys 38-39
+        self.assertEqual(vl.entries[38].sample_id, 201)
+        self.assertEqual(vl.entries[39].sample_id, 201)
+
+
 if __name__ == '__main__':
     unittest.main()

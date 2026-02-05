@@ -45,6 +45,8 @@ class WavEntry:
     path: Path
     root_key: Optional[int] = None
     vel_range: Optional[Tuple[int, int]] = None  # (start_zone, end_zone) 0-7
+    lo_key: Optional[int] = None  # Explicit low key (0-127)
+    hi_key: Optional[int] = None  # Explicit high key (0-127)
 
 
 def parse_velocity_range(spec: str) -> Optional[Tuple[int, int]]:
@@ -140,15 +142,21 @@ def parse_note_name(note: str) -> Optional[int]:
 
 def read_wav_list(list_file: Path) -> List[WavEntry]:
     """
-    Read list of WAV file paths with optional root keys and velocity ranges.
+    Read list of WAV file paths with optional root keys, key ranges, and velocity ranges.
 
     File format (one entry per line):
         filename.wav                    # Defaults for everything
         filename.wav C4                 # Root key only
-        filename.wav C4 v1-3            # Root key + velocity range (numeric)
-        filename.wav C4 ppp-p           # Root key + velocity range (named)
-        filename.wav C4 mf              # Root key + single velocity zone
+        filename.wav C4 C3 C5           # Root key, lokey, hikey
+        filename.wav C4 C3 C5 v1-3      # Root key, lokey, hikey, velocity
+        filename.wav 60 36 84           # MIDI numbers work too
+        filename.wav C4 v1-3            # Root key + velocity (no key range)
         # This is a comment
+
+    Column order after filename: [root_key] [lokey] [hikey] [velocity]
+    - lokey/hikey are optional but must appear together (both or neither)
+    - When present, they explicitly set the range; the fill algorithm does NOT extend beyond
+    - When absent, fill algorithm works as before
 
     Args:
         list_file: Path to text file
@@ -175,23 +183,72 @@ def read_wav_list(list_file: Path) -> List[WavEntry]:
 
             entry = WavEntry(path=wav_path)
 
-            # Parse remaining columns (root key and/or velocity range)
-            for part in parts[1:]:
-                # Try velocity range first
-                vel = parse_velocity_range(part)
-                if vel is not None:
-                    entry.vel_range = vel
-                    continue
+            # Parse remaining columns positionally
+            # Extract velocity range if last part looks like one
+            remaining = parts[1:]
+            if remaining and parse_velocity_range(remaining[-1]) is not None:
+                entry.vel_range = parse_velocity_range(remaining[-1])
+                remaining = remaining[:-1]
 
-                # Try root key
-                rk = parse_note_name(part)
-                if rk is not None:
-                    entry.root_key = rk
-                    continue
-
+            # Now remaining should be: [] or [root_key] or [root_key, lokey, hikey]
+            if len(remaining) == 0:
+                pass  # No key info
+            elif len(remaining) == 1:
+                # Just root key
+                rk = parse_note_name(remaining[0])
+                if rk is None:
+                    raise Wav2KrzError(
+                        f"Invalid root key '{remaining[0]}' on line {line_num}. "
+                        f"Expected note name (C4) or MIDI number (60)."
+                    )
+                entry.root_key = rk
+            elif len(remaining) == 3:
+                # root_key, lokey, hikey
+                rk = parse_note_name(remaining[0])
+                lo = parse_note_name(remaining[1])
+                hi = parse_note_name(remaining[2])
+                if rk is None:
+                    raise Wav2KrzError(
+                        f"Invalid root key '{remaining[0]}' on line {line_num}."
+                    )
+                if lo is None:
+                    raise Wav2KrzError(
+                        f"Invalid lokey '{remaining[1]}' on line {line_num}."
+                    )
+                if hi is None:
+                    raise Wav2KrzError(
+                        f"Invalid hikey '{remaining[2]}' on line {line_num}."
+                    )
+                if lo > hi:
+                    raise Wav2KrzError(
+                        f"lokey ({remaining[1]}) must be <= hikey ({remaining[2]}) on line {line_num}."
+                    )
+                entry.root_key = rk
+                entry.lo_key = lo
+                entry.hi_key = hi
+            elif len(remaining) == 2:
+                # Ambiguous: could be root_key + something invalid, or missing hikey
+                # Check if both look like notes - if so, error about missing hikey
+                n1 = parse_note_name(remaining[0])
+                n2 = parse_note_name(remaining[1])
+                if n1 is not None and n2 is not None:
+                    raise Wav2KrzError(
+                        f"Missing hikey on line {line_num}. "
+                        f"lokey/hikey must appear together (got root_key and lokey only)."
+                    )
+                elif n1 is not None:
+                    raise Wav2KrzError(
+                        f"Unknown parameter '{remaining[1]}' on line {line_num}. "
+                        f"Expected velocity range (v1-3, ppp-p) or lokey+hikey pair."
+                    )
+                else:
+                    raise Wav2KrzError(
+                        f"Invalid root key '{remaining[0]}' on line {line_num}."
+                    )
+            else:
                 raise Wav2KrzError(
-                    f"Unknown parameter '{part}' on line {line_num}. "
-                    f"Expected root key (C4, 60) or velocity range (v1-3, ppp-p)."
+                    f"Too many parameters on line {line_num}. "
+                    f"Expected: filename [root_key] [lokey hikey] [velocity]"
                 )
 
             entries.append(entry)
@@ -208,7 +265,8 @@ def convert_wavs_to_krz(
     name: Optional[str] = None,
     root_key: Optional[int] = None,
     root_keys: Optional[List[Optional[int]]] = None,
-    vel_ranges: Optional[List[Optional[Tuple[int, int]]]] = None
+    vel_ranges: Optional[List[Optional[Tuple[int, int]]]] = None,
+    key_ranges: Optional[List[Optional[Tuple[int, int]]]] = None
 ) -> None:
     """
     Convert WAV files to Kurzweil .krz format.
@@ -225,6 +283,9 @@ def convert_wavs_to_krz(
                    length of wav_files. None entries use default or WAV metadata.
         vel_ranges: Per-sample velocity ranges as (start_zone, end_zone) tuples.
                     Zones are 0-7 mapping to ppp through fff.
+        key_ranges: Per-sample key ranges as (lokey, hikey) tuples.
+                    When specified, the fill algorithm will not extend
+                    a sample beyond these bounds.
 
     Raises:
         Wav2KrzError: On conversion errors
@@ -295,7 +356,8 @@ def convert_wavs_to_krz(
 
         if mode == ConversionMode.INSTRUMENT:
             keymap = create_instrument_keymap(
-                samples, keymap_id, base_name, vel_layer_map=vel_layer_map)
+                samples, keymap_id, base_name, vel_layer_map=vel_layer_map,
+                key_ranges=key_ranges)
         else:
             # In drumset mode, root_keys from the list file specify key positions.
             # Build key_assignments: explicit key per sample, or None for consecutive.
@@ -314,7 +376,8 @@ def convert_wavs_to_krz(
             keymap = create_drumset_keymap(
                 samples, keymap_id, base_name, start_key,
                 vel_layer_map=vel_layer_map,
-                key_assignments=drum_key_assignments)
+                key_assignments=drum_key_assignments,
+                key_ranges=key_ranges)
 
         writer.add_keymap(keymap)
 
@@ -351,8 +414,13 @@ def convert_from_list_file(
     wav_files = [e.path for e in entries]
     root_keys = [e.root_key for e in entries]
     vel_ranges = [e.vel_range for e in entries]
+    key_ranges = [
+        (e.lo_key, e.hi_key) if e.lo_key is not None else None
+        for e in entries
+    ]
 
     convert_wavs_to_krz(
         wav_files, output_path, mode, start_key, start_id, name,
-        root_key=root_key, root_keys=root_keys, vel_ranges=vel_ranges
+        root_key=root_key, root_keys=root_keys, vel_ranges=vel_ranges,
+        key_ranges=key_ranges
     )

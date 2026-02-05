@@ -140,6 +140,56 @@ class TestReadWavList(unittest.TestCase):
         entries = read_wav_list(listfile)
         self.assertTrue(entries[0].path.is_absolute())
 
+    def test_with_key_range(self):
+        """Parse lokey/hikey from list file."""
+        make_wav(self.dir / 'a.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text('a.wav C4 C3 C5\n')
+        entries = read_wav_list(listfile)
+        self.assertEqual(entries[0].root_key, 60)  # C4
+        self.assertEqual(entries[0].lo_key, 48)    # C3
+        self.assertEqual(entries[0].hi_key, 72)    # C5
+        self.assertIsNone(entries[0].vel_range)
+
+    def test_with_key_range_and_velocity(self):
+        """Parse lokey/hikey with velocity range."""
+        make_wav(self.dir / 'a.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text('a.wav C4 C3 C5 v1-3\n')
+        entries = read_wav_list(listfile)
+        self.assertEqual(entries[0].root_key, 60)
+        self.assertEqual(entries[0].lo_key, 48)
+        self.assertEqual(entries[0].hi_key, 72)
+        self.assertEqual(entries[0].vel_range, (0, 2))
+
+    def test_key_range_midi_numbers(self):
+        """Parse lokey/hikey as MIDI numbers."""
+        make_wav(self.dir / 'a.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text('a.wav 60 36 84\n')
+        entries = read_wav_list(listfile)
+        self.assertEqual(entries[0].root_key, 60)
+        self.assertEqual(entries[0].lo_key, 36)
+        self.assertEqual(entries[0].hi_key, 84)
+
+    def test_key_range_lokey_greater_than_hikey_error(self):
+        """Error when lokey > hikey."""
+        make_wav(self.dir / 'a.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text('a.wav C4 C5 C3\n')  # lokey C5 > hikey C3
+        with self.assertRaises(Wav2KrzError) as ctx:
+            read_wav_list(listfile)
+        self.assertIn('lokey', str(ctx.exception).lower())
+
+    def test_key_range_missing_hikey_error(self):
+        """Error when lokey provided but hikey missing."""
+        make_wav(self.dir / 'a.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text('a.wav C4 C3\n')  # root + lokey but no hikey
+        with self.assertRaises(Wav2KrzError) as ctx:
+            read_wav_list(listfile)
+        self.assertIn('hikey', str(ctx.exception).lower())
+
 
 class TestConvertWavsToKrz(unittest.TestCase):
     def setUp(self):

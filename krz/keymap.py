@@ -318,9 +318,52 @@ class KKeymap:
         f.seek(end_pos)
 
 
-def _populate_instrument_vl(vl: VeloLevel, sample_list: List[KSample]) -> None:
-    """Place samples in a velocity level at their root key positions, then fill gaps."""
-    for sample in sample_list:
+def _fill_with_key_ranges(vl: VeloLevel, sample_list: List[KSample],
+                          sample_positions: list,
+                          key_ranges: List[tuple]) -> None:
+    """
+    Fill explicit key ranges for all samples.
+
+    All samples must have explicit (lokey, hikey) ranges. Each sample fills
+    only within its specified range. Gaps between ranges are left unfilled.
+
+    Args:
+        vl: VeloLevel with samples already placed at root positions
+        sample_list: List of KSample objects
+        sample_positions: List of (sample_idx, header_idx, key_position) tuples
+        key_ranges: List of (lokey, hikey) tuples for each sample (all required)
+    """
+    # Clear any samples placed outside their explicit range
+    for sample_idx, header_idx, key_position in sample_positions:
+        lo_key, hi_key = key_ranges[sample_idx]
+        if key_position < lo_key or key_position > hi_key:
+            vl.entries[key_position] = KeymapEntry()
+
+    # Fill each sample's explicit range
+    for sample_idx, header_idx, key_position in sample_positions:
+        lo_key, hi_key = key_ranges[sample_idx]
+        sample = sample_list[sample_idx]
+
+        for k in range(lo_key, hi_key + 1):
+            if not vl.entries[k].is_used():
+                vl.set_sample_at_root(sample, header_idx, k)
+
+
+def _populate_instrument_vl(vl: VeloLevel, sample_list: List[KSample],
+                            key_ranges: List[tuple] = None) -> None:
+    """
+    Place samples in a velocity level at their root key positions, then fill gaps.
+
+    Args:
+        vl: VeloLevel to populate
+        sample_list: List of KSample objects
+        key_ranges: Optional list of (lokey, hikey) tuples for each sample.
+                    If provided, ALL samples must have explicit ranges (no None values).
+                    Each sample fills only within its specified range.
+    """
+    # First, place all samples at their root key positions
+    sample_positions = []  # (sample_idx, header_idx, key_position)
+    for sample_idx, sample in enumerate(sample_list):
         for header_idx in range(len(sample.headers)):
             if sample.is_stereo() and header_idx % 2 == 1:
                 continue
@@ -328,13 +371,33 @@ def _populate_instrument_vl(vl: VeloLevel, sample_list: List[KSample]) -> None:
             key_position = root_key - 12
             key_position = max(0, min(127, key_position))
             vl.set_sample_at_root(sample, header_idx, key_position)
-    vl.fill_spaces_between_samples()
+            sample_positions.append((sample_idx, header_idx, key_position))
+
+    # If key_ranges provided and all samples have explicit ranges, use bounded fill
+    if key_ranges and all(kr is not None for kr in key_ranges):
+        _fill_with_key_ranges(vl, sample_list, sample_positions, key_ranges)
+    else:
+        # No explicit ranges (or mixed - treat as none): use standard fill
+        vl.fill_spaces_between_samples()
 
 
 def _populate_drumset_vl(vl: VeloLevel, sample_list: List[KSample],
                          start_key: int,
-                         key_assignments: List[int] = None) -> None:
-    """Place samples on assigned keys (or consecutive keys from start_key), then fill gaps."""
+                         key_assignments: List[int] = None,
+                         key_ranges: List[tuple] = None) -> None:
+    """
+    Place samples on assigned keys (or consecutive keys from start_key), then fill gaps.
+
+    Args:
+        vl: VeloLevel to populate
+        sample_list: List of KSample objects
+        start_key: Starting MIDI key for consecutive assignment
+        key_assignments: Optional per-sample key positions
+        key_ranges: Optional list of (lokey, hikey) tuples for each sample.
+                    If provided, ALL samples must have explicit ranges (no None values).
+                    Each sample fills only within its specified range.
+    """
+    sample_positions = []  # (sample_idx, header_idx, key_position)
     for i, sample in enumerate(sample_list):
         if key_assignments is not None and i < len(key_assignments):
             key = key_assignments[i]
@@ -342,7 +405,14 @@ def _populate_drumset_vl(vl: VeloLevel, sample_list: List[KSample],
             key = start_key + i
         if 0 <= key < 128:
             vl.set_sample_at_root(sample, 0, key)
-    vl.fill_spaces_between_samples()
+            sample_positions.append((i, 0, key))
+
+    # If key_ranges provided and all samples have explicit ranges, use bounded fill
+    if key_ranges and all(kr is not None for kr in key_ranges):
+        _fill_with_key_ranges(vl, sample_list, sample_positions, key_ranges)
+    else:
+        # No explicit ranges (or mixed - treat as none): use standard fill
+        vl.fill_spaces_between_samples()
 
 
 def _setup_velocity_layers(
@@ -351,6 +421,7 @@ def _setup_velocity_layers(
     vel_layer_map: dict,
     populate_fn,
     key_assignments: List[int] = None,
+    key_ranges: List[tuple] = None,
     **populate_kwargs
 ) -> None:
     """
@@ -363,6 +434,8 @@ def _setup_velocity_layers(
         populate_fn: Function to populate each VeloLevel
         key_assignments: Optional per-sample key positions (indexed by
                          original sample index). Remapped per velocity group.
+        key_ranges: Optional per-sample key ranges (indexed by original
+                    sample index). Remapped per velocity group.
         **populate_kwargs: Extra kwargs passed to populate_fn
     """
     # Sort layers by start zone for consistent ordering
@@ -374,11 +447,14 @@ def _setup_velocity_layers(
         sample_indices = vel_layer_map[vel_range]
         layer_samples = [samples[i] for i in sample_indices]
 
-        # Remap key_assignments for this subset of samples
+        # Remap key_assignments and key_ranges for this subset of samples
         layer_kwargs = dict(populate_kwargs)
         if key_assignments is not None:
             layer_keys = [key_assignments[i] for i in sample_indices]
             layer_kwargs['key_assignments'] = layer_keys
+        if key_ranges is not None:
+            layer_key_ranges = [key_ranges[i] for i in sample_indices]
+            layer_kwargs['key_ranges'] = layer_key_ranges
 
         vl = km.new_level()
         populate_fn(vl, layer_samples, **layer_kwargs)
@@ -409,7 +485,8 @@ def create_instrument_keymap(
     samples: List[KSample] | KSample,
     keymap_id: int,
     name: str,
-    vel_layer_map: dict = None
+    vel_layer_map: dict = None,
+    key_ranges: List[tuple] = None
 ) -> KKeymap:
     """
     Create a keymap for instrument mode (samples pitched across keyboard).
@@ -423,6 +500,8 @@ def create_instrument_keymap(
         name: Keymap name
         vel_layer_map: Optional velocity layer mapping
                        {(start_zone, end_zone): [sample_indices...]}
+        key_ranges: Optional per-sample (lokey, hikey) tuples. Samples with
+                    explicit ranges only fill within those bounds.
 
     Returns:
         KKeymap configured for instrument use
@@ -442,10 +521,11 @@ def create_instrument_keymap(
 
     if vel_layer_map and len(vel_layer_map) > 1:
         _setup_velocity_layers(
-            km, samples, vel_layer_map, _populate_instrument_vl)
+            km, samples, vel_layer_map, _populate_instrument_vl,
+            key_ranges=key_ranges)
     else:
         vl = km.new_level()
-        _populate_instrument_vl(vl, samples)
+        _populate_instrument_vl(vl, samples, key_ranges=key_ranges)
         km.velocity_mapping = [0] * 8
 
     return km
@@ -457,7 +537,8 @@ def create_drumset_keymap(
     name: str,
     start_key: int = 36,
     vel_layer_map: dict = None,
-    key_assignments: List[int] = None
+    key_assignments: List[int] = None,
+    key_ranges: List[tuple] = None
 ) -> KKeymap:
     """
     Create a keymap for drumset mode (each sample on a different key).
@@ -472,6 +553,8 @@ def create_drumset_keymap(
         key_assignments: Optional per-sample key positions (MIDI note numbers).
                          Must match length of samples. None entries fall back
                          to consecutive start_key assignment.
+        key_ranges: Optional per-sample (lokey, hikey) tuples. Samples with
+                    explicit ranges only fill within those bounds.
 
     Returns:
         KKeymap configured for drumset use
@@ -489,11 +572,13 @@ def create_drumset_keymap(
     if vel_layer_map and len(vel_layer_map) > 1:
         _setup_velocity_layers(
             km, samples, vel_layer_map, _populate_drumset_vl,
-            start_key=start_key, key_assignments=key_assignments)
+            start_key=start_key, key_assignments=key_assignments,
+            key_ranges=key_ranges)
     else:
         vl = km.new_level()
         _populate_drumset_vl(vl, samples, start_key,
-                             key_assignments=key_assignments)
+                             key_assignments=key_assignments,
+                             key_ranges=key_ranges)
         km.velocity_mapping = [0] * 8
 
     return km

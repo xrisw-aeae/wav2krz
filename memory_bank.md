@@ -145,9 +145,16 @@ filename.wav                    # Defaults for everything
 filename.wav C4                 # Root key (note name or MIDI number)
 filename.wav C4 v1-3            # Root key + velocity range
 filename.wav 60 ppp-p           # MIDI number + named velocity range
+filename.wav C4 C3 C5           # Root key, lokey, hikey (explicit key range)
+filename.wav C4 C3 C5 v1-3      # Root key, lokey, hikey, velocity
 ```
 
-Relative paths resolve from the list file's directory.
+Column order: `filename [root_key] [lokey hikey] [velocity]`
+
+- lokey/hikey are optional but must appear together (both or neither)
+- When ALL samples have explicit ranges, each sample fills only within its range
+- When any sample lacks explicit range, standard fill algorithm is used for all
+- Relative paths resolve from the list file's directory.
 
 ## CLI Usage
 
@@ -213,7 +220,7 @@ wav2krz was developed as a standalone Python reimplementation of parts of the Ja
 ## Future Improvements
 
 1. ~~**Loop points from WAV metadata**~~ - Done. Loop points from `smpl` chunks are validated (bounds-clamped), sampledata is truncated to match `sample_end`, and multi-sample offset alignment is correct.
-2. **Per-sample lokey/hikey attributes** - Add optional low/high key columns to list file for explicit keyboard range control instead of relying on the fill algorithm
+2. ~~**Per-sample lokey/hikey attributes**~~ - Done. List file now supports optional lokey/hikey columns for explicit keyboard range control. When all samples have explicit ranges, each fills only within its bounds; otherwise standard fill is used.
 3. **Multi-layer drumset mode** - Each drum sample gets its own keymap and layer (up to 32 layers) within a single program, using the Kurzweil layer architecture
 4. **Multiple programs per .krz file** - Support defining and writing several instruments/drumsets into a single output file
 5. **.for format output** (backburner) - Support Kurzweil Forte/PC3 native format (`COOL` magic) as an output option; requires reverse-engineering the object framing
