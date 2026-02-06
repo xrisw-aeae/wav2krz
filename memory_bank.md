@@ -6,7 +6,7 @@
 
 **Primary Purpose:**
 - Convert one or more WAV files into a single `.krz` file
-- Support three conversion modes: raw samples, pitched instrument, and drumset
+- Support four conversion modes: raw samples, pitched instrument, drumset, and multi-layer drumset
 - Handle mono/stereo, 8-bit/16-bit PCM WAV input
 - Read WAV `smpl` chunk metadata (root key, loop points)
 - Support velocity layering via list file syntax
@@ -78,6 +78,7 @@ List file → read_wav_list() → WavEntry[] → convert_wavs_to_krz() → KrzWr
 | `samples` | Raw sample data only | KSample(s) |
 | `instrument` | Pitched across keyboard, gaps filled | KSample(s) + KKeymap + KProgram |
 | `drumset` | One sample per key, consecutive or assigned | KSample(s) + KKeymap + KProgram |
+| `drumset-multi` | Each group gets own keymap + layer with key range | KSample(s) + KKeymap(s) + KProgram |
 
 ### .krz File Format (Big-Endian)
 
@@ -151,6 +152,48 @@ filename.wav C4 C3 C5 v1-3      # Root key, lokey, hikey, velocity
 
 Column order: `filename [root_key] [lokey hikey] [velocity]`
 
+**Program sections** define multiple programs in one file:
+```
+@program "Grand Piano" instrument    # Start new program section
+@keymap "Piano Map"                  # Name the keymap
+piano_c4.wav C4
+piano_d4.wav D4
+
+@program "Drum Kit" drumset-multi    # Another program with different mode
+@group C2 A#1 C2
+@keymap "Kick"                       # Per-group keymap name
+kick.wav f-fff
+```
+
+`@program "Name" [mode]` — starts a new program section
+- Name is required (quoted if spaces)
+- Mode is optional; falls back to CLI `--mode`
+- Resets `@group` and `@keymap` context
+
+`@keymap "Name"` — names the keymap
+- At section level: default keymap name for the section
+- After `@group` (in drumset-multi): names that group's keymap
+- Each new `@group` resets the per-group keymap name
+- Falls back to program name, then output filename
+
+Files without `@program` work exactly as before (single implicit section).
+
+**Group headers** reduce repetition (available in all modes):
+```
+@group C2 A#1 C2           # Set root=C2, lo=A#1, hi=C2 for following samples
+filename.wav f-fff          # Inherits root/lo/hi from group
+filename.wav ppp-p          # Same group
+
+@group C#2                  # Set root=C#2 only (no lo/hi)
+filename.wav                # Inherits root from group
+```
+
+`@group` syntax: `@group root_key [lo_key hi_key]`
+- Inside a `@group`, sample lines are: `filename [velocity]`
+- A new `@group` line starts a new group context
+- Lines outside any `@group` use the full column format
+
+Additional rules:
 - lokey/hikey are optional but must appear together (both or neither)
 - When ALL samples have explicit ranges, each sample fills only within its range
 - When any sample lacks explicit range, standard fill algorithm is used for all
@@ -221,7 +264,8 @@ wav2krz was developed as a standalone Python reimplementation of parts of the Ja
 
 1. ~~**Loop points from WAV metadata**~~ - Done. Loop points from `smpl` chunks are validated (bounds-clamped), sampledata is truncated to match `sample_end`, and multi-sample offset alignment is correct.
 2. ~~**Per-sample lokey/hikey attributes**~~ - Done. List file now supports optional lokey/hikey columns for explicit keyboard range control. When all samples have explicit ranges, each fills only within its bounds; otherwise standard fill is used.
-3. **Multi-layer drumset mode** - Each drum sample gets its own keymap and layer (up to 32 layers) within a single program, using the Kurzweil layer architecture
-4. **Multiple programs per .krz file** - Support defining and writing several instruments/drumsets into a single output file
-5. **.for format output** (backburner) - Support Kurzweil Forte/PC3 native format (`COOL` magic) as an output option; requires reverse-engineering the object framing
-6. **Compact keymap / sample merging** (backburner) - Merge individual samples into a single multi-subsample object, then strip per-entry sample IDs from the keymap (saves ~256 bytes per velocity level). Matches KurzFiler's `compactKeymap()` behavior.
+3. ~~**Multi-layer drumset mode**~~ - Done. `drumset-multi` mode groups samples by root key (using `@group` directives), creates per-group keymaps, and produces a single program with multiple layers. Each layer's LYR segment restricts its key range so only the correct keymap sounds per key. Supports velocity layering within groups and explicit key ranges via `@group lo_key hi_key`. Max 32 groups (Kurzweil layer limit).
+4. ~~**Improve naming of programs and keymaps**~~ - Done. `@keymap "Name"` directive names keymaps explicitly. At section level sets default; inside `@group` sets per-group keymap name. Falls back to program name, then output filename.
+5. ~~**Multiple programs per .krz file**~~ - Done. `@program "Name" [mode]` directive starts a new program section. Each section gets its own program, keymaps, and samples with separate ID counters. Files without `@program` work exactly as before.
+6. **.for format output** (backburner) - Support Kurzweil Forte/PC3 native format (`COOL` magic) as an output option; requires reverse-engineering the object framing
+7. **Compact keymap / sample merging** (backburner) - Merge individual samples into a single multi-subsample object, then strip per-entry sample IDs from the keymap (saves ~256 bytes per velocity level). Matches KurzFiler's `compactKeymap()` behavior.

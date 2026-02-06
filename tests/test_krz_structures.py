@@ -1,4 +1,4 @@
-"""Tests for KRZ data structures: hash, header, sample, envelope."""
+"""Tests for KRZ data structures: hash, header, sample, envelope, program."""
 
 import io
 import struct
@@ -8,6 +8,10 @@ from ..krz.hash import KHash
 from ..krz.header import KrzHeader
 from ..krz.sample import (
     KSample, Soundfilehead, Envelope, swap_bytes, create_sample_from_wav
+)
+from ..krz.keymap import create_instrument_keymap, KKeymap
+from ..krz.program import (
+    KProgram, Segment, create_program, create_multi_layer_program
 )
 from ..wav.parser import WavFile, SampleInfo
 
@@ -272,6 +276,112 @@ class TestCreateSampleFromWav(unittest.TestCase):
         ks = create_sample_from_wav(wav, 'test', 200)
         self.assertEqual(KHash.get_id(ks.get_hash()), 200)
         self.assertEqual(KHash.get_type(ks.get_hash()), KHash.T_SAMPLE)
+
+
+class TestAddLayerKeyRange(unittest.TestCase):
+    def _make_keymap(self, km_id=200):
+        wav = WavFile(channels=1, sample_rate=44100, bits_per_sample=16,
+                      data=b'\x00\x01' * 100)
+        sample = create_sample_from_wav(wav, 'test', km_id, root_key=60)
+        return create_instrument_keymap(sample, km_id, 'test')
+
+    def test_default_full_range(self):
+        """Default layer covers full keyboard (0-127)."""
+        km = self._make_keymap()
+        prog = KProgram()
+        prog.make_pgm_block()
+        prog.add_layer(km, stereo=False)
+        # Find LYR segment
+        lyr = [s for s in prog.segments if s.tag == Segment.LYRSEGTAG][0]
+        self.assertEqual(lyr.data[3], 0)
+        self.assertEqual(lyr.data[4], 127)
+
+    def test_custom_key_range(self):
+        """Custom lo_key/hi_key set on LYR segment."""
+        km = self._make_keymap()
+        prog = KProgram()
+        prog.make_pgm_block()
+        prog.add_layer(km, stereo=False, lo_key=36, hi_key=48)
+        lyr = [s for s in prog.segments if s.tag == Segment.LYRSEGTAG][0]
+        self.assertEqual(lyr.data[3], 36)
+        self.assertEqual(lyr.data[4], 48)
+
+    def test_stereo_custom_key_range(self):
+        """Custom key range works for stereo layers too."""
+        wav = WavFile(channels=2, sample_rate=44100, bits_per_sample=16,
+                      data=b'\x00\x01\x02\x03' * 100)
+        sample = create_sample_from_wav(wav, 'test', 200, root_key=60)
+        km = create_instrument_keymap(sample, 200, 'test')
+        prog = KProgram()
+        prog.make_pgm_block()
+        prog.add_layer(km, stereo=True, lo_key=24, hi_key=60)
+        lyr = [s for s in prog.segments if s.tag == Segment.LYRSEGTAG][0]
+        self.assertEqual(lyr.data[3], 24)
+        self.assertEqual(lyr.data[4], 60)
+
+
+class TestMultiLayerProgram(unittest.TestCase):
+    def _make_keymap(self, km_id):
+        wav = WavFile(channels=1, sample_rate=44100, bits_per_sample=16,
+                      data=b'\x00\x01' * 100)
+        sample = create_sample_from_wav(wav, f'test{km_id}', km_id, root_key=60)
+        return create_instrument_keymap(sample, km_id, f'test{km_id}')
+
+    def test_two_layers(self):
+        """Multi-layer program has correct layer count."""
+        km1 = self._make_keymap(200)
+        km2 = self._make_keymap(201)
+        prog = create_multi_layer_program(
+            [km1, km2], 200, 'test',
+            stereo_flags=[False, False],
+            key_ranges=[(36, 36), (38, 38)])
+        # PGM segment should show 2 layers
+        pgm = [s for s in prog.segments if s.tag == Segment.PGMSEGTAG][0]
+        self.assertEqual(pgm.data[1], 2)
+
+    def test_layer_key_ranges(self):
+        """Each layer has its own key range."""
+        km1 = self._make_keymap(200)
+        km2 = self._make_keymap(201)
+        prog = create_multi_layer_program(
+            [km1, km2], 200, 'test',
+            stereo_flags=[False, False],
+            key_ranges=[(36, 36), (38, 45)])
+        lyrs = [s for s in prog.segments if s.tag == Segment.LYRSEGTAG]
+        self.assertEqual(len(lyrs), 2)
+        self.assertEqual(lyrs[0].data[3], 36)
+        self.assertEqual(lyrs[0].data[4], 36)
+        self.assertEqual(lyrs[1].data[3], 38)
+        self.assertEqual(lyrs[1].data[4], 45)
+
+    def test_layer_keymap_refs(self):
+        """Each layer references the correct keymap."""
+        km1 = self._make_keymap(200)
+        km2 = self._make_keymap(201)
+        prog = create_multi_layer_program(
+            [km1, km2], 200, 'test',
+            stereo_flags=[False, False],
+            key_ranges=[(36, 36), (38, 38)])
+        cals = [s for s in prog.segments if s.tag == Segment.CALSEGTAG]
+        self.assertEqual(len(cals), 2)
+        # First CAL references keymap 200
+        km1_id = KHash.get_id(km1.get_hash())
+        self.assertEqual((cals[0].data[7] << 8) | cals[0].data[8], km1_id)
+        # Second CAL references keymap 201
+        km2_id = KHash.get_id(km2.get_hash())
+        self.assertEqual((cals[1].data[7] << 8) | cals[1].data[8], km2_id)
+
+    def test_write_roundtrip(self):
+        """Multi-layer program can be written to a buffer."""
+        km1 = self._make_keymap(200)
+        km2 = self._make_keymap(201)
+        prog = create_multi_layer_program(
+            [km1, km2], 200, 'test',
+            stereo_flags=[False, False],
+            key_ranges=[(36, 36), (38, 38)])
+        buf = io.BytesIO()
+        prog.write(buf)
+        self.assertGreater(buf.tell(), 0)
 
 
 if __name__ == '__main__':

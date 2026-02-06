@@ -1,7 +1,8 @@
 """Main converter orchestration for wav2krz."""
 
 import re
-from dataclasses import dataclass
+import shlex
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -9,7 +10,7 @@ from .wav.parser import parse_wav, WavFile
 from .krz.writer import KrzWriter
 from .krz.sample import create_sample_from_wav, KSample
 from .krz.keymap import create_instrument_keymap, create_drumset_keymap, KKeymap
-from .krz.program import create_program, KProgram
+from .krz.program import create_program, create_multi_layer_program, KProgram
 
 # Output extension to program mode mapping
 FORMAT_MODES = {
@@ -25,6 +26,7 @@ class ConversionMode:
     SAMPLES = "samples"
     INSTRUMENT = "instrument"
     DRUMSET = "drumset"
+    DRUMSET_MULTI = "drumset-multi"
 
 
 # Note name to MIDI number mapping
@@ -47,6 +49,97 @@ class WavEntry:
     vel_range: Optional[Tuple[int, int]] = None  # (start_zone, end_zone) 0-7
     lo_key: Optional[int] = None  # Explicit low key (0-127)
     hi_key: Optional[int] = None  # Explicit high key (0-127)
+    keymap_name: Optional[str] = None  # Per-entry keymap name (from @keymap in @group)
+
+
+@dataclass
+class DrumGroup:
+    """A group of samples sharing the same root key for drumset-multi mode."""
+    root_key: int
+    lo_key: int  # Layer lower bound
+    hi_key: int  # Layer upper bound
+    sample_indices: List[int]  # Indices into the original entries list
+    vel_layer_map: Optional[dict] = None  # {(start, end): [local_indices...]}
+    keymap_name: Optional[str] = None  # Per-group keymap name (from @keymap)
+
+
+@dataclass
+class ProgramSection:
+    """A parsed @program section from a list file."""
+    name: Optional[str] = None
+    mode: Optional[str] = None
+    keymap_name: Optional[str] = None  # Section-level default keymap name
+    entries: List[WavEntry] = field(default_factory=list)
+
+
+def _build_drum_groups(entries: List[WavEntry]) -> List[DrumGroup]:
+    """
+    Group WavEntries by root_key for drumset-multi mode.
+
+    Each group of entries sharing the same root_key becomes one layer.
+    Layer key range comes from lo_key/hi_key if present, otherwise lo=hi=root_key.
+
+    Args:
+        entries: List of WavEntry (all must have root_key set)
+
+    Returns:
+        List of DrumGroup sorted by root_key
+
+    Raises:
+        Wav2KrzError: If entries lack root_key or exceed 32 groups
+    """
+    # Group entries by root_key
+    groups_by_key = {}  # root_key -> list of (original_index, entry)
+    for i, entry in enumerate(entries):
+        if entry.root_key is None:
+            raise Wav2KrzError(
+                f"All samples in drumset-multi mode must have a root key. "
+                f"Sample '{entry.path.name}' (index {i}) has no root key."
+            )
+        groups_by_key.setdefault(entry.root_key, []).append((i, entry))
+
+    if len(groups_by_key) > 32:
+        raise Wav2KrzError(
+            f"Too many drum groups ({len(groups_by_key)}). "
+            f"Kurzweil supports a maximum of 32 layers per program."
+        )
+
+    groups = []
+    for root_key in sorted(groups_by_key.keys()):
+        members = groups_by_key[root_key]
+        sample_indices = [idx for idx, _ in members]
+
+        # Derive layer key range
+        first_entry = members[0][1]
+        if first_entry.lo_key is not None and first_entry.hi_key is not None:
+            lo_key = first_entry.lo_key
+            hi_key = first_entry.hi_key
+        else:
+            lo_key = root_key
+            hi_key = root_key
+
+        # Build velocity layer map if any entries have velocity ranges
+        has_vel = any(e.vel_range is not None for _, e in members)
+        vel_layer_map = None
+        if has_vel:
+            vel_layer_map = {}
+            for local_idx, (_, entry) in enumerate(members):
+                vr = entry.vel_range if entry.vel_range is not None else (0, 7)
+                vel_layer_map.setdefault(vr, []).append(local_idx)
+
+        # Pick up keymap_name from first entry in the group
+        group_keymap_name = members[0][1].keymap_name
+
+        groups.append(DrumGroup(
+            root_key=root_key,
+            lo_key=lo_key,
+            hi_key=hi_key,
+            sample_indices=sample_indices,
+            vel_layer_map=vel_layer_map,
+            keymap_name=group_keymap_name,
+        ))
+
+    return groups
 
 
 def parse_velocity_range(spec: str) -> Optional[Tuple[int, int]]:
@@ -140,6 +233,170 @@ def parse_note_name(note: str) -> Optional[int]:
     return None
 
 
+def _parse_group_header(parts: List[str], line_num: int) -> dict:
+    """
+    Parse a @group header line.
+
+    Format: @group root_key [lo_key hi_key]
+
+    Args:
+        parts: Split line parts (after @group)
+        line_num: Line number for error messages
+
+    Returns:
+        Dict with root_key, lo_key, hi_key
+    """
+    if not parts:
+        raise Wav2KrzError(
+            f"@group requires at least a root_key on line {line_num}."
+        )
+
+    rk = parse_note_name(parts[0])
+    if rk is None:
+        raise Wav2KrzError(
+            f"Invalid root key '{parts[0]}' in @group on line {line_num}."
+        )
+
+    result = {'root_key': rk, 'lo_key': None, 'hi_key': None}
+
+    if len(parts) == 1:
+        pass  # root_key only
+    elif len(parts) == 3:
+        lo = parse_note_name(parts[1])
+        hi = parse_note_name(parts[2])
+        if lo is None:
+            raise Wav2KrzError(
+                f"Invalid lokey '{parts[1]}' in @group on line {line_num}."
+            )
+        if hi is None:
+            raise Wav2KrzError(
+                f"Invalid hikey '{parts[2]}' in @group on line {line_num}."
+            )
+        if lo > hi:
+            raise Wav2KrzError(
+                f"lokey ({parts[1]}) must be <= hikey ({parts[2]}) in @group on line {line_num}."
+            )
+        result['lo_key'] = lo
+        result['hi_key'] = hi
+    elif len(parts) == 2:
+        raise Wav2KrzError(
+            f"@group has lokey but missing hikey on line {line_num}. "
+            f"Expected: @group root_key [lokey hikey]"
+        )
+    else:
+        raise Wav2KrzError(
+            f"Too many parameters in @group on line {line_num}. "
+            f"Expected: @group root_key [lokey hikey]"
+        )
+
+    return result
+
+
+def _parse_sample_line(parts: List[str], line_num: int, list_file: Path,
+                       group: dict = None) -> WavEntry:
+    """
+    Parse a single sample line.
+
+    When inside a @group, sample lines are: filename [velocity]
+    When outside a @group, sample lines are: filename [root_key] [lokey hikey] [velocity]
+
+    Args:
+        parts: Split line parts
+        line_num: Line number for error messages
+        list_file: Path to list file (for resolving relative paths)
+        group: Current group context, or None
+
+    Returns:
+        WavEntry
+    """
+    wav_path = Path(parts[0])
+    if not wav_path.is_absolute():
+        wav_path = list_file.parent / wav_path
+
+    entry = WavEntry(path=wav_path)
+
+    if group is not None:
+        # Inside a @group: inherit root_key/lo_key/hi_key, only velocity is optional
+        entry.root_key = group['root_key']
+        entry.lo_key = group['lo_key']
+        entry.hi_key = group['hi_key']
+
+        remaining = parts[1:]
+        if remaining and parse_velocity_range(remaining[-1]) is not None:
+            entry.vel_range = parse_velocity_range(remaining[-1])
+            remaining = remaining[:-1]
+
+        if remaining:
+            raise Wav2KrzError(
+                f"Unexpected parameter '{remaining[0]}' on line {line_num}. "
+                f"Inside @group, sample lines should be: filename [velocity]"
+            )
+    else:
+        # Outside any @group: full column format
+        remaining = parts[1:]
+        if remaining and parse_velocity_range(remaining[-1]) is not None:
+            entry.vel_range = parse_velocity_range(remaining[-1])
+            remaining = remaining[:-1]
+
+        if len(remaining) == 0:
+            pass
+        elif len(remaining) == 1:
+            rk = parse_note_name(remaining[0])
+            if rk is None:
+                raise Wav2KrzError(
+                    f"Invalid root key '{remaining[0]}' on line {line_num}. "
+                    f"Expected note name (C4) or MIDI number (60)."
+                )
+            entry.root_key = rk
+        elif len(remaining) == 3:
+            rk = parse_note_name(remaining[0])
+            lo = parse_note_name(remaining[1])
+            hi = parse_note_name(remaining[2])
+            if rk is None:
+                raise Wav2KrzError(
+                    f"Invalid root key '{remaining[0]}' on line {line_num}."
+                )
+            if lo is None:
+                raise Wav2KrzError(
+                    f"Invalid lokey '{remaining[1]}' on line {line_num}."
+                )
+            if hi is None:
+                raise Wav2KrzError(
+                    f"Invalid hikey '{remaining[2]}' on line {line_num}."
+                )
+            if lo > hi:
+                raise Wav2KrzError(
+                    f"lokey ({remaining[1]}) must be <= hikey ({remaining[2]}) on line {line_num}."
+                )
+            entry.root_key = rk
+            entry.lo_key = lo
+            entry.hi_key = hi
+        elif len(remaining) == 2:
+            n1 = parse_note_name(remaining[0])
+            n2 = parse_note_name(remaining[1])
+            if n1 is not None and n2 is not None:
+                raise Wav2KrzError(
+                    f"Missing hikey on line {line_num}. "
+                    f"lokey/hikey must appear together (got root_key and lokey only)."
+                )
+            elif n1 is not None:
+                raise Wav2KrzError(
+                    f"Unknown parameter '{remaining[1]}' on line {line_num}. "
+                    f"Expected velocity range (v1-3, ppp-p) or lokey+hikey pair."
+                )
+            else:
+                raise Wav2KrzError(
+                    f"Invalid root key '{remaining[0]}' on line {line_num}."
+                )
+        else:
+            raise Wav2KrzError(
+                f"Too many parameters on line {line_num}. "
+                f"Expected: filename [root_key] [lokey hikey] [velocity]"
+            )
+
+    return entry
+
+
 def read_wav_list(list_file: Path) -> List[WavEntry]:
     """
     Read list of WAV file paths with optional root keys, key ranges, and velocity ranges.
@@ -153,6 +410,14 @@ def read_wav_list(list_file: Path) -> List[WavEntry]:
         filename.wav C4 v1-3            # Root key + velocity (no key range)
         # This is a comment
 
+    Group headers reduce repetition:
+        @group C2 A#1 C2               # Set root=C2, lo=A#1, hi=C2
+        filename.wav f-fff              # Inherits root/lo/hi from group
+        filename.wav ppp-p              # Same group
+
+        @group C#2                      # Set root=C#2 only (no lo/hi)
+        filename.wav                    # Inherits root from group
+
     Column order after filename: [root_key] [lokey] [hikey] [velocity]
     - lokey/hikey are optional but must appear together (both or neither)
     - When present, they explicitly set the range; the fill algorithm does NOT extend beyond
@@ -165,95 +430,154 @@ def read_wav_list(list_file: Path) -> List[WavEntry]:
         List of WavEntry objects.
     """
     entries = []
+    current_group = None
+
     with open(list_file, 'r') as f:
         for line_num, line in enumerate(f, 1):
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
 
-            # Split line into parts
             parts = line.split()
             if not parts:
                 continue
 
-            wav_path = Path(parts[0])
-            # If relative path, make it relative to list file's directory
-            if not wav_path.is_absolute():
-                wav_path = list_file.parent / wav_path
+            # Check for @group directive
+            if parts[0].lower() == '@group':
+                current_group = _parse_group_header(parts[1:], line_num)
+                continue
 
-            entry = WavEntry(path=wav_path)
-
-            # Parse remaining columns positionally
-            # Extract velocity range if last part looks like one
-            remaining = parts[1:]
-            if remaining and parse_velocity_range(remaining[-1]) is not None:
-                entry.vel_range = parse_velocity_range(remaining[-1])
-                remaining = remaining[:-1]
-
-            # Now remaining should be: [] or [root_key] or [root_key, lokey, hikey]
-            if len(remaining) == 0:
-                pass  # No key info
-            elif len(remaining) == 1:
-                # Just root key
-                rk = parse_note_name(remaining[0])
-                if rk is None:
-                    raise Wav2KrzError(
-                        f"Invalid root key '{remaining[0]}' on line {line_num}. "
-                        f"Expected note name (C4) or MIDI number (60)."
-                    )
-                entry.root_key = rk
-            elif len(remaining) == 3:
-                # root_key, lokey, hikey
-                rk = parse_note_name(remaining[0])
-                lo = parse_note_name(remaining[1])
-                hi = parse_note_name(remaining[2])
-                if rk is None:
-                    raise Wav2KrzError(
-                        f"Invalid root key '{remaining[0]}' on line {line_num}."
-                    )
-                if lo is None:
-                    raise Wav2KrzError(
-                        f"Invalid lokey '{remaining[1]}' on line {line_num}."
-                    )
-                if hi is None:
-                    raise Wav2KrzError(
-                        f"Invalid hikey '{remaining[2]}' on line {line_num}."
-                    )
-                if lo > hi:
-                    raise Wav2KrzError(
-                        f"lokey ({remaining[1]}) must be <= hikey ({remaining[2]}) on line {line_num}."
-                    )
-                entry.root_key = rk
-                entry.lo_key = lo
-                entry.hi_key = hi
-            elif len(remaining) == 2:
-                # Ambiguous: could be root_key + something invalid, or missing hikey
-                # Check if both look like notes - if so, error about missing hikey
-                n1 = parse_note_name(remaining[0])
-                n2 = parse_note_name(remaining[1])
-                if n1 is not None and n2 is not None:
-                    raise Wav2KrzError(
-                        f"Missing hikey on line {line_num}. "
-                        f"lokey/hikey must appear together (got root_key and lokey only)."
-                    )
-                elif n1 is not None:
-                    raise Wav2KrzError(
-                        f"Unknown parameter '{remaining[1]}' on line {line_num}. "
-                        f"Expected velocity range (v1-3, ppp-p) or lokey+hikey pair."
-                    )
-                else:
-                    raise Wav2KrzError(
-                        f"Invalid root key '{remaining[0]}' on line {line_num}."
-                    )
-            else:
-                raise Wav2KrzError(
-                    f"Too many parameters on line {line_num}. "
-                    f"Expected: filename [root_key] [lokey hikey] [velocity]"
-                )
-
+            entry = _parse_sample_line(parts, line_num, list_file, current_group)
             entries.append(entry)
 
     return entries
+
+
+# Valid modes for @program directive
+_VALID_MODES = {
+    ConversionMode.SAMPLES,
+    ConversionMode.INSTRUMENT,
+    ConversionMode.DRUMSET,
+    ConversionMode.DRUMSET_MULTI,
+}
+
+
+def _parse_directive_name(line: str, directive: str, line_num: int) -> List[str]:
+    """
+    Parse a @program or @keymap line using shlex for quoted name support.
+
+    Returns list of tokens after the directive keyword.
+    """
+    try:
+        tokens = shlex.split(line)
+    except ValueError as e:
+        raise Wav2KrzError(
+            f"Invalid quoting in {directive} on line {line_num}: {e}"
+        )
+    # tokens[0] is the directive itself
+    return tokens[1:]
+
+
+def read_program_list(list_file: Path) -> List[ProgramSection]:
+    """
+    Read a list file with optional @program and @keymap directives.
+
+    Returns a list of ProgramSection objects. Files without @program
+    produce a single section with name=None and mode=None.
+
+    Directives:
+        @program "Name" [mode]  — start a new program section
+        @keymap "Name"          — name the keymap (section-level or per-group)
+        @group root [lo hi]     — start a drum group (resets per-group keymap)
+
+    Args:
+        list_file: Path to text file
+
+    Returns:
+        List of ProgramSection objects
+    """
+    sections = []
+    current_section = ProgramSection()
+    current_group = None
+    group_keymap_name = None
+
+    with open(list_file, 'r') as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+
+            parts = line.split()
+            if not parts:
+                continue
+
+            keyword = parts[0].lower()
+
+            if keyword == '@program':
+                # Finalize current section if it has entries
+                if current_section.entries or current_section.name is not None:
+                    sections.append(current_section)
+                # Parse @program "Name" [mode]
+                args = _parse_directive_name(line, '@program', line_num)
+                if not args:
+                    raise Wav2KrzError(
+                        f"@program requires a name on line {line_num}."
+                    )
+                prog_name = args[0]
+                prog_mode = None
+                if len(args) >= 2:
+                    prog_mode = args[1].lower()
+                    if prog_mode not in _VALID_MODES:
+                        raise Wav2KrzError(
+                            f"Invalid mode '{args[1]}' in @program on line {line_num}. "
+                            f"Valid modes: {', '.join(sorted(_VALID_MODES))}"
+                        )
+                if len(args) > 2:
+                    raise Wav2KrzError(
+                        f"Too many parameters in @program on line {line_num}. "
+                        f"Expected: @program \"Name\" [mode]"
+                    )
+                current_section = ProgramSection(name=prog_name, mode=prog_mode)
+                current_group = None
+                group_keymap_name = None
+                continue
+
+            if keyword == '@keymap':
+                args = _parse_directive_name(line, '@keymap', line_num)
+                if not args:
+                    raise Wav2KrzError(
+                        f"@keymap requires a name on line {line_num}."
+                    )
+                if len(args) > 1:
+                    raise Wav2KrzError(
+                        f"Too many parameters in @keymap on line {line_num}. "
+                        f"Expected: @keymap \"Name\""
+                    )
+                km_name = args[0]
+                if current_group is not None:
+                    # Inside a @group: set per-group keymap name
+                    group_keymap_name = km_name
+                else:
+                    # Section level: set default keymap name
+                    current_section.keymap_name = km_name
+                continue
+
+            if keyword == '@group':
+                current_group = _parse_group_header(parts[1:], line_num)
+                group_keymap_name = None  # Reset per-group keymap name
+                continue
+
+            # Sample line
+            entry = _parse_sample_line(parts, line_num, list_file, current_group)
+            if group_keymap_name is not None:
+                entry.keymap_name = group_keymap_name
+            current_section.entries.append(entry)
+
+    # Finalize last section
+    if current_section.entries or current_section.name is not None:
+        sections.append(current_section)
+
+    return sections
 
 
 def convert_wavs_to_krz(
@@ -266,7 +590,8 @@ def convert_wavs_to_krz(
     root_key: Optional[int] = None,
     root_keys: Optional[List[Optional[int]]] = None,
     vel_ranges: Optional[List[Optional[Tuple[int, int]]]] = None,
-    key_ranges: Optional[List[Optional[Tuple[int, int]]]] = None
+    key_ranges: Optional[List[Optional[Tuple[int, int]]]] = None,
+    entries: Optional[List[WavEntry]] = None
 ) -> None:
     """
     Convert WAV files to Kurzweil .krz format.
@@ -274,7 +599,7 @@ def convert_wavs_to_krz(
     Args:
         wav_files: List of paths to WAV files
         output_path: Output .krz file path
-        mode: Conversion mode (samples, instrument, drumset)
+        mode: Conversion mode (samples, instrument, drumset, drumset-multi)
         start_key: Starting MIDI key for drumset mode (default 36 = C1)
         start_id: Starting object ID (default 200)
         name: Base name for keymap/program (default: output filename)
@@ -286,6 +611,7 @@ def convert_wavs_to_krz(
         key_ranges: Per-sample key ranges as (lokey, hikey) tuples.
                     When specified, the fill algorithm will not extend
                     a sample beyond these bounds.
+        entries: Original WavEntry list (used for drumset-multi grouping)
 
     Raises:
         Wav2KrzError: On conversion errors
@@ -385,8 +711,224 @@ def convert_wavs_to_krz(
         program = create_program(keymap, program_id, base_name, has_stereo, mode=pgm_mode)
         writer.add_program(program)
 
+    elif mode == ConversionMode.DRUMSET_MULTI:
+        # Build entries if not provided (construct from flat lists)
+        if entries is None:
+            entries = []
+            for i, wf in enumerate(wav_files):
+                e = WavEntry(path=wf)
+                if root_keys and i < len(root_keys):
+                    e.root_key = root_keys[i]
+                if vel_ranges and i < len(vel_ranges):
+                    e.vel_range = vel_ranges[i]
+                if key_ranges and i < len(key_ranges) and key_ranges[i] is not None:
+                    e.lo_key, e.hi_key = key_ranges[i]
+                entries.append(e)
+
+        groups = _build_drum_groups(entries)
+        base_name = name if name else output_path.stem[:16]
+        pgm_mode = FORMAT_MODES.get(output_path.suffix.lower(), 2)
+
+        keymaps = []
+        stereo_flags = []
+        layer_key_ranges = []
+
+        for group_idx, group in enumerate(groups):
+            group_samples = [samples[i] for i in group.sample_indices]
+            keymap_id = start_id + group_idx
+
+            has_group_stereo = any(s.is_stereo() for s in group_samples)
+            stereo_flags.append(has_group_stereo)
+            layer_key_ranges.append((group.lo_key, group.hi_key))
+
+            km = create_instrument_keymap(
+                group_samples, keymap_id, base_name,
+                vel_layer_map=group.vel_layer_map)
+            keymaps.append(km)
+            writer.add_keymap(km)
+
+        program_id = start_id
+        program = create_multi_layer_program(
+            keymaps, program_id, base_name,
+            stereo_flags=stereo_flags,
+            key_ranges=layer_key_ranges,
+            mode=pgm_mode)
+        writer.add_program(program)
+
     # Write the .krz file
     writer.write(output_path)
+
+
+def _process_section(
+    section: ProgramSection,
+    writer: KrzWriter,
+    next_sample_id: int,
+    next_keymap_id: int,
+    next_program_id: int,
+    output_path: Path,
+    cli_mode: str,
+    cli_name: Optional[str],
+    cli_root_key: Optional[int],
+    cli_start_key: int,
+) -> Tuple[int, int, int]:
+    """
+    Process a single ProgramSection, adding objects to the writer.
+
+    Args:
+        section: The program section to process
+        writer: KrzWriter to add objects to
+        next_sample_id: Next available sample ID
+        next_keymap_id: Next available keymap ID
+        next_program_id: Next available program ID
+        output_path: Output file path (for format detection and default naming)
+        cli_mode: CLI mode fallback
+        cli_name: CLI name fallback
+        cli_root_key: CLI root key override
+        cli_start_key: Starting key for drumset modes
+
+    Returns:
+        Tuple of (next_sample_id, next_keymap_id, next_program_id)
+    """
+    entries = section.entries
+    if not entries:
+        return next_sample_id, next_keymap_id, next_program_id
+
+    mode = section.mode or cli_mode
+    # Program name: section name > CLI name > output filename
+    program_name = section.name or cli_name or output_path.stem[:16]
+    # Keymap name: section keymap_name > program name
+    default_keymap_name = section.keymap_name or program_name
+
+    wav_files = [e.path for e in entries]
+    root_keys = [e.root_key for e in entries]
+    vel_ranges = [e.vel_range for e in entries]
+    key_ranges = [
+        (e.lo_key, e.hi_key) if e.lo_key is not None else None
+        for e in entries
+    ]
+
+    # Parse all WAV files and create samples
+    samples: List[KSample] = []
+    sample_vel_ranges: List[Optional[Tuple[int, int]]] = []
+    sample_id = next_sample_id
+
+    for i, wav_path in enumerate(wav_files):
+        if not wav_path.exists():
+            raise Wav2KrzError(f"WAV file not found: {wav_path}")
+
+        try:
+            wav_data = parse_wav(wav_path)
+        except Exception as e:
+            raise Wav2KrzError(f"Error parsing {wav_path}: {e}")
+
+        sample_name = wav_path.stem[:16]
+
+        if cli_root_key is not None:
+            sample_root_key = cli_root_key
+        elif root_keys[i] is not None:
+            sample_root_key = root_keys[i]
+        elif mode == ConversionMode.DRUMSET:
+            sample_root_key = cli_start_key + len(samples)
+            if sample_root_key > 127:
+                sample_root_key = 127
+        else:
+            sample_root_key = 60
+
+        sample = create_sample_from_wav(wav_data, sample_name, sample_id, sample_root_key)
+        samples.append(sample)
+        writer.add_sample(sample)
+        sample_id += 1
+
+        vr = vel_ranges[i]
+        sample_vel_ranges.append(vr)
+
+    next_sample_id = sample_id
+
+    # Create keymap and program based on mode
+    if mode in (ConversionMode.INSTRUMENT, ConversionMode.DRUMSET):
+        base_name = default_keymap_name
+        keymap_id = next_keymap_id
+        program_id = next_program_id
+
+        has_stereo = any(s.is_stereo() for s in samples)
+
+        has_vel_layers = any(vr is not None for vr in sample_vel_ranges)
+        vel_layer_map = None
+        if has_vel_layers:
+            vel_layer_map = {}
+            for idx, vr in enumerate(sample_vel_ranges):
+                if vr is None:
+                    vr = (0, 7)
+                vel_layer_map.setdefault(vr, []).append(idx)
+
+        if mode == ConversionMode.INSTRUMENT:
+            keymap = create_instrument_keymap(
+                samples, keymap_id, base_name, vel_layer_map=vel_layer_map,
+                key_ranges=key_ranges)
+        else:
+            drum_key_assignments = None
+            if any(rk is not None for rk in root_keys):
+                next_auto_key = cli_start_key
+                drum_key_assignments = []
+                for rk in root_keys:
+                    if rk is not None:
+                        drum_key_assignments.append(rk)
+                    else:
+                        drum_key_assignments.append(next_auto_key)
+                        next_auto_key += 1
+
+            keymap = create_drumset_keymap(
+                samples, keymap_id, base_name, cli_start_key,
+                vel_layer_map=vel_layer_map,
+                key_assignments=drum_key_assignments,
+                key_ranges=key_ranges)
+
+        writer.add_keymap(keymap)
+        next_keymap_id = keymap_id + 1
+
+        pgm_mode = FORMAT_MODES.get(output_path.suffix.lower(), 2)
+        program = create_program(
+            keymap, program_id, program_name, has_stereo, mode=pgm_mode)
+        writer.add_program(program)
+        next_program_id = program_id + 1
+
+    elif mode == ConversionMode.DRUMSET_MULTI:
+        groups = _build_drum_groups(entries)
+        pgm_mode = FORMAT_MODES.get(output_path.suffix.lower(), 2)
+
+        keymaps = []
+        stereo_flags = []
+        layer_key_ranges = []
+
+        for group_idx, group in enumerate(groups):
+            group_samples = [samples[i] for i in group.sample_indices]
+            keymap_id = next_keymap_id + group_idx
+
+            has_group_stereo = any(s.is_stereo() for s in group_samples)
+            stereo_flags.append(has_group_stereo)
+            layer_key_ranges.append((group.lo_key, group.hi_key))
+
+            # Keymap name: group keymap_name > section keymap_name > program name
+            km_name = group.keymap_name or default_keymap_name
+
+            km = create_instrument_keymap(
+                group_samples, keymap_id, km_name,
+                vel_layer_map=group.vel_layer_map)
+            keymaps.append(km)
+            writer.add_keymap(km)
+
+        next_keymap_id += len(groups)
+
+        program_id = next_program_id
+        program = create_multi_layer_program(
+            keymaps, program_id, program_name,
+            stereo_flags=stereo_flags,
+            key_ranges=layer_key_ranges,
+            mode=pgm_mode)
+        writer.add_program(program)
+        next_program_id = program_id + 1
+
+    return next_sample_id, next_keymap_id, next_program_id
 
 
 def convert_from_list_file(
@@ -401,6 +943,9 @@ def convert_from_list_file(
     """
     Convert WAV files listed in a text file to .krz format.
 
+    Supports @program and @keymap directives for multi-program files.
+    Files without @program work exactly as before.
+
     Args:
         list_file: Path to text file with WAV paths, root keys, velocity ranges
         output_path: Output .krz file path
@@ -410,17 +955,20 @@ def convert_from_list_file(
         name: Base name for keymap/program
         root_key: Global root key override (overrides per-sample keys from file)
     """
-    entries = read_wav_list(list_file)
-    wav_files = [e.path for e in entries]
-    root_keys = [e.root_key for e in entries]
-    vel_ranges = [e.vel_range for e in entries]
-    key_ranges = [
-        (e.lo_key, e.hi_key) if e.lo_key is not None else None
-        for e in entries
-    ]
+    sections = read_program_list(list_file)
 
-    convert_wavs_to_krz(
-        wav_files, output_path, mode, start_key, start_id, name,
-        root_key=root_key, root_keys=root_keys, vel_ranges=vel_ranges,
-        key_ranges=key_ranges
-    )
+    if not sections:
+        raise Wav2KrzError("No entries found in list file")
+
+    writer = KrzWriter()
+    next_sample_id = start_id
+    next_keymap_id = start_id
+    next_program_id = start_id
+
+    for section in sections:
+        next_sample_id, next_keymap_id, next_program_id = _process_section(
+            section, writer, next_sample_id, next_keymap_id, next_program_id,
+            output_path, cli_mode=mode, cli_name=name,
+            cli_root_key=root_key, cli_start_key=start_key)
+
+    writer.write(output_path)
