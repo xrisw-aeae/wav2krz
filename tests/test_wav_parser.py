@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from ..wav.parser import parse_wav, WavFile, SampleInfo
-from ..exceptions import WavParseError, UnsupportedWavFormat
+from wav2krz.wav.parser import parse_wav, WavFile, SampleInfo
+from wav2krz.exceptions import WavParseError, UnsupportedWavFormat
 from .helpers import make_wav
 
 

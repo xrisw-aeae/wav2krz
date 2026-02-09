@@ -4,12 +4,12 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from ..converter import (
+from wav2krz.converter import (
     parse_note_name, parse_velocity_range, read_wav_list, read_program_list,
     convert_wavs_to_krz, convert_from_list_file, ConversionMode, WavEntry,
     ProgramSection, _build_drum_groups,
 )
-from ..exceptions import Wav2KrzError
+from wav2krz.exceptions import Wav2KrzError
 from .helpers import make_wav
 
 

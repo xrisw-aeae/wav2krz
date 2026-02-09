@@ -127,7 +127,7 @@ def main(args: list[str] | None = None) -> int:
         parser.error("Output file required (positional argument or --output)")
 
     # Ensure .krz extension
-    if not output_path.suffix.lower() in ('.krz', '.k25', '.k26'):
+    if not output_path.suffix.lower() in ('.krz', '.k25', '.k26', '.for'):
         output_path = output_path.with_suffix('.krz')
 
     try:

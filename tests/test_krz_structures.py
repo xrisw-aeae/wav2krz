@@ -4,16 +4,16 @@ import io
 import struct
 import unittest
 
-from ..krz.hash import KHash
-from ..krz.header import KrzHeader
-from ..krz.sample import (
+from wav2krz.krz.hash import KHash
+from wav2krz.krz.header import KrzHeader
+from wav2krz.krz.sample import (
     KSample, Soundfilehead, Envelope, swap_bytes, create_sample_from_wav
 )
-from ..krz.keymap import create_instrument_keymap, KKeymap
-from ..krz.program import (
+from wav2krz.krz.keymap import create_instrument_keymap, KKeymap
+from wav2krz.krz.program import (
     KProgram, Segment, create_program, create_multi_layer_program
 )
-from ..wav.parser import WavFile, SampleInfo
+from wav2krz.wav.parser import WavFile, SampleInfo
 
 
 class TestKHash(unittest.TestCase):

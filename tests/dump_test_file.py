@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from ..converter import convert_wavs_to_krz, ConversionMode
+from wav2krz.converter import convert_wavs_to_krz, ConversionMode
 from .helpers import make_wav
 
 

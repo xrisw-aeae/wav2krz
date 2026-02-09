@@ -18,44 +18,64 @@
 | Language | Python 3.12 |
 | Dependencies | None (pure stdlib) |
 | Test Framework | pytest |
-| Build/Run | `python -m wav2krz` |
+| Build/Install | `pip install -e .` (pyproject.toml + setuptools) |
+| Entry Point | `wav2krz` CLI or `python -m wav2krz` |
 | License | (not yet specified) |
 
 ## Project Structure
 
 ```
-/wav2krz/
-├── __init__.py              # Package init, version "1.0.0"
-├── __main__.py              # Entry point: python -m wav2krz
-├── cli.py                   # Argument parsing and CLI orchestration
-├── converter.py             # Main conversion logic, list file parsing
-├── exceptions.py            # Custom exception hierarchy
-├── krz/                     # Kurzweil .krz format module
-│   ├── __init__.py          # Re-exports all krz types
-│   ├── hash.py              # KHash: object ID/type hashing (from KurzFiler)
-│   ├── header.py            # KrzHeader: 32-byte PRAM file header
-│   ├── keymap.py            # KKeymap, VeloLevel, KeymapEntry + fill algorithm
-│   ├── program.py           # KProgram, Segment structures
-│   ├── sample.py            # KSample, Soundfilehead, Envelope, byte-swapping
-│   └── writer.py            # KrzWriter: assembles complete .krz file
-├── wav/                     # WAV parsing module
-│   ├── __init__.py          # Re-exports WavFile, parse_wav
-│   └── parser.py            # RIFF/WAV chunk parser, smpl chunk support
-├── tests/                   # Test suite
+wav2krz/
+├── pyproject.toml              # Package metadata, entry points, pytest config
+├── README.md                   # User-facing docs (install, usage, list file format)
+├── memory_bank.md              # This file — detailed project memory
+├── src/
+│   └── wav2krz/                # The installable Python package
+│       ├── __init__.py         # Package init, version "1.0.0"
+│       ├── __main__.py         # Entry point: python -m wav2krz
+│       ├── cli.py              # Argument parsing and CLI orchestration
+│       ├── converter.py        # Main conversion logic, list file parsing
+│       ├── exceptions.py       # Custom exception hierarchy
+│       ├── krz/                # Kurzweil .krz format module
+│       │   ├── __init__.py     # Re-exports all krz types
+│       │   ├── hash.py         # KHash: object ID/type hashing
+│       │   ├── header.py       # KrzHeader: 32-byte PRAM file header
+│       │   ├── keymap.py       # KKeymap, VeloLevel, KeymapEntry + fill algorithm
+│       │   ├── program.py      # KProgram, Segment structures
+│       │   ├── sample.py       # KSample, Soundfilehead, Envelope, byte-swapping
+│       │   ├── writer.py       # KrzWriter: assembles complete .krz file
+│       │   ├── for_writer.py   # ForWriter: .for (Forte/PC3) file output
+│       │   └── for_templates.py # Binary program templates for .for format
+│       └── wav/                # WAV parsing module
+│           ├── __init__.py     # Re-exports WavFile, parse_wav
+│           └── parser.py       # RIFF/WAV chunk parser, smpl chunk support
+├── tests/                      # Test suite (absolute imports: from wav2krz.xxx)
 │   ├── __init__.py
-│   ├── helpers.py           # make_wav() - generates test WAV files
-│   ├── test_converter.py    # Converter integration tests
-│   ├── test_keymap.py       # Keymap/fill algorithm tests
+│   ├── helpers.py              # make_wav() - generates test WAV files
+│   ├── test_converter.py       # Converter integration tests
+│   ├── test_keymap.py          # Keymap/fill algorithm tests
 │   ├── test_krz_structures.py  # KSample, KKeymap, KProgram unit tests
-│   └── test_wav_parser.py   # WAV parser tests
-├── analyze_for.py           # .for format analysis script (research)
-├── analyze_for2.py          # .for format analysis script v2 (research)
-├── analyze_for3.py          # .for format analysis script v3 (research)
-├── compare_formats.py       # .krz vs .for comparison tool (research)
-├── make_control.py          # Generates control_sine.wav for testing
-├── control_sine.wav         # Reference WAV file
-├── control_sine.krz         # Reference .krz output
-└── control_sine.for         # Reference .for file (Forte format)
+│   ├── test_wav_parser.py      # WAV parser tests
+│   ├── test_for_writer.py      # .for format output tests
+│   └── dump_test_file.py       # Debug utility for dumping .krz structure
+└── research/                   # Reverse-engineering scripts and analysis files
+    ├── analyze_for.py          # .for format analysis scripts (v1-v3)
+    ├── analyze_for2.py
+    ├── analyze_for3.py
+    ├── analyze_for_deep.py     # Field-level .for vs .krz comparison
+    ├── analyze_for_files.py    # Parse/compare/diff .for files
+    ├── compare_formats.py      # .krz vs .for comparison tool
+    ├── debug_file.py           # General file debug utility
+    ├── generate_for_test_files.py # Generate .k26 test files for conversion
+    ├── make_control.py         # Generates control_sine.wav for testing
+    ├── control_sine.wav        # Reference WAV file
+    ├── control_sine.krz        # Reference .krz output
+    ├── control_sine.for        # Reference .for file (Forte format)
+    ├── for_format.md           # .for format reverse-engineering notes
+    ├── for_analysis/           # Parsed .for file dumps
+    ├── for_fx_analysis/        # .for effects analysis
+    ├── for_test_k26/           # Test .k26 files for conversion testing
+    └── for_test_wavs/          # Test WAV files for .for testing
 ```
 
 ## Architecture
@@ -105,7 +125,7 @@ List file → read_wav_list() → WavEntry[] → convert_wavs_to_krz() → KrzWr
 | File | Purpose |
 |------|---------|
 | `cli.py` | argparse CLI: modes, start-key, root-key, start-id, name, verbose |
-| `converter.py` | `convert_wavs_to_krz()`, `convert_from_list_file()`, `read_wav_list()` |
+| `converter.py` | `convert_wavs_to_krz()`, `convert_from_list_file()`, `read_wav_list()`, `read_program_list()` |
 | `exceptions.py` | `Wav2KrzError` hierarchy: `WavParseError`, `UnsupportedWavFormat`, `KrzWriteError`, `InvalidNameError` |
 
 ### WAV Parsing
@@ -124,6 +144,8 @@ List file → read_wav_list() → WavEntry[] → convert_wavs_to_krz() → KrzWr
 | `krz/keymap.py` | `KKeymap`, `VeloLevel`, `KeymapEntry`, `fill_spaces_between_samples()` fill algorithm |
 | `krz/program.py` | `KProgram`, `Segment` (tag-based blocks: PGM, LYR, ENV, CAL, HOB, etc.) |
 | `krz/writer.py` | `KrzWriter` - assembles header + sorted objects + sample data into complete file |
+| `krz/for_writer.py` | `ForWriter` - assembles .for files (Forte/PC3 format, `COOL` magic) |
+| `krz/for_templates.py` | Binary program/layer templates and `build_program_data()` for .for N-layer programs |
 
 ## Keymap Fill Algorithm
 
@@ -203,16 +225,20 @@ Additional rules:
 
 ```bash
 # Samples only
-python -m wav2krz wavlist.txt output.krz --mode samples
+wav2krz wavlist.txt output.krz --mode samples
 
 # Instrument (pitched)
-python -m wav2krz wavlist.txt output.krz --mode instrument
+wav2krz wavlist.txt output.krz --mode instrument
 
 # Drumset starting at C1
-python -m wav2krz wavlist.txt output.krz --mode drumset --start-key 36
+wav2krz wavlist.txt output.krz --mode drumset --start-key 36
 
 # Direct WAV files
-python -m wav2krz --wav kick.wav snare.wav --output drums.krz --mode drumset
+wav2krz --wav kick.wav snare.wav --output drums.krz --mode drumset
+
+# K2500 / K2600 output
+wav2krz --wav pad.wav -o pad.k25
+wav2krz --wav pad.wav -o pad.k26
 
 # Options
 #   --start-id 200     Starting object ID (default 200)
@@ -224,11 +250,11 @@ python -m wav2krz --wav kick.wav snare.wav --output drums.krz --mode drumset
 ## Testing
 
 ```bash
-# Run all tests
-python -m pytest tests/ -v
+# Run all tests (210 tests)
+pytest tests/ -v
 
 # Run specific test file
-python -m pytest tests/test_converter.py -v
+pytest tests/test_converter.py -v
 ```
 
 Test helper `make_wav()` generates PCM WAV files with configurable frequency, duration, sample rate, bit depth, channels, loop points, and root key.
@@ -260,12 +286,12 @@ Test helper `make_wav()` generates PCM WAV files with configurable frequency, du
 
 wav2krz was developed as a standalone Python reimplementation of parts of the Java KurzFiler project. The `krz/` module's object model (`KHash`, `KSample`, `KKeymap`, `KProgram`, `KrzWriter`) is a Python translation of KurzFiler's `kurzobjects/` and `filemethods/kurzweil/` packages. The hash generation algorithm in `KHash` matches `KHash.java` exactly.
 
-## Future Improvements
+## Completed Features
 
-1. ~~**Loop points from WAV metadata**~~ - Done. Loop points from `smpl` chunks are validated (bounds-clamped), sampledata is truncated to match `sample_end`, and multi-sample offset alignment is correct.
-2. ~~**Per-sample lokey/hikey attributes**~~ - Done. List file now supports optional lokey/hikey columns for explicit keyboard range control. When all samples have explicit ranges, each fills only within its bounds; otherwise standard fill is used.
-3. ~~**Multi-layer drumset mode**~~ - Done. `drumset-multi` mode groups samples by root key (using `@group` directives), creates per-group keymaps, and produces a single program with multiple layers. Each layer's LYR segment restricts its key range so only the correct keymap sounds per key. Supports velocity layering within groups and explicit key ranges via `@group lo_key hi_key`. Max 32 groups (Kurzweil layer limit).
-4. ~~**Improve naming of programs and keymaps**~~ - Done. `@keymap "Name"` directive names keymaps explicitly. At section level sets default; inside `@group` sets per-group keymap name. Falls back to program name, then output filename.
-5. ~~**Multiple programs per .krz file**~~ - Done. `@program "Name" [mode]` directive starts a new program section. Each section gets its own program, keymaps, and samples with separate ID counters. Files without `@program` work exactly as before.
-6. **.for format output** (backburner) - Support Kurzweil Forte/PC3 native format (`COOL` magic) as an output option; requires reverse-engineering the object framing
-7. **Compact keymap / sample merging** (backburner) - Merge individual samples into a single multi-subsample object, then strip per-entry sample IDs from the keymap (saves ~256 bytes per velocity level). Matches KurzFiler's `compactKeymap()` behavior.
+1. **Loop points from WAV metadata** — Loop points from `smpl` chunks are validated (bounds-clamped), sampledata is truncated to match `sample_end`, and multi-sample offset alignment is correct.
+2. **Per-sample lokey/hikey attributes** — List file supports optional lokey/hikey columns for explicit keyboard range control.
+3. **Multi-layer drumset mode** — `drumset-multi` mode groups samples by root key, creates per-group keymaps, and produces a single program with multiple layers. Max 32 groups.
+4. **Naming of programs and keymaps** — `@keymap "Name"` directive at section and per-group level.
+5. **Multiple programs per file** — `@program "Name" [mode]` directive for multi-program .krz files.
+6. **.for format output** — ForWriter produces Kurzweil Forte/PC3 native format (`COOL` magic). Hardware-verified 1-4 layers.
+7. **Proper package structure** — src layout with pyproject.toml, `pip install -e .`, `wav2krz` CLI entry point.

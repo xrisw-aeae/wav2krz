@@ -2,13 +2,13 @@
 
 import unittest
 
-from ..krz.hash import KHash
-from ..krz.keymap import (
+from wav2krz.krz.hash import KHash
+from wav2krz.krz.keymap import (
     KKeymap, VeloLevel, KeymapEntry, method_to_size,
     create_instrument_keymap, create_drumset_keymap,
 )
-from ..krz.sample import KSample, Soundfilehead, Envelope, create_sample_from_wav
-from ..wav.parser import WavFile
+from wav2krz.krz.sample import KSample, Soundfilehead, Envelope, create_sample_from_wav
+from wav2krz.wav.parser import WavFile
 
 
 def _make_sample(sample_id: int, root_key: int = 60) -> KSample:

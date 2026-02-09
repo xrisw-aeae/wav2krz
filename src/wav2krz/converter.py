@@ -8,6 +8,7 @@ from typing import List, Optional, Tuple
 
 from .wav.parser import parse_wav, WavFile
 from .krz.writer import KrzWriter
+from .krz.for_writer import ForWriter
 from .krz.sample import create_sample_from_wav, KSample
 from .krz.keymap import create_instrument_keymap, create_drumset_keymap, KKeymap
 from .krz.program import create_program, create_multi_layer_program, KProgram
@@ -17,6 +18,7 @@ FORMAT_MODES = {
     '.krz': 2,  # K2000
     '.k25': 3,  # K2500
     '.k26': 4,  # K2600
+    '.for': 4,  # Forte/PC3 (uses K2600 program segments internally)
 }
 from .exceptions import Wav2KrzError
 
@@ -619,7 +621,10 @@ def convert_wavs_to_krz(
     if not wav_files:
         raise Wav2KrzError("No WAV files to convert")
 
-    writer = KrzWriter()
+    if output_path.suffix.lower() == '.for':
+        writer = ForWriter()
+    else:
+        writer = KrzWriter()
     samples: List[KSample] = []
     sample_vel_ranges: List[Optional[Tuple[int, int]]] = []
 
@@ -761,7 +766,7 @@ def convert_wavs_to_krz(
 
 def _process_section(
     section: ProgramSection,
-    writer: KrzWriter,
+    writer,
     next_sample_id: int,
     next_keymap_id: int,
     next_program_id: int,
@@ -960,7 +965,10 @@ def convert_from_list_file(
     if not sections:
         raise Wav2KrzError("No entries found in list file")
 
-    writer = KrzWriter()
+    if output_path.suffix.lower() == '.for':
+        writer = ForWriter()
+    else:
+        writer = KrzWriter()
     next_sample_id = start_id
     next_keymap_id = start_id
     next_program_id = start_id
