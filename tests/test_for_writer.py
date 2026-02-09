@@ -538,5 +538,139 @@ class TestForWriterCLI(unittest.TestCase):
             self.assertEqual(data[:4], b'COOL')
 
 
+class TestForWriterMultiProgram(unittest.TestCase):
+    """Tests for multi-program .for output."""
+
+    def setUp(self):
+        self.tmpdir = TemporaryDirectory()
+        self.dir = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _extract_program_keymap_ids(self, prog_data: bytes) -> list:
+        """Extract keymap IDs from .for program data layer blocks."""
+        layer_count = prog_data[LAYER_COUNT_OFFSET]
+        ids = []
+        for i in range(layer_count):
+            offset = LAYER_BLOCK_START + i * LAYER_BLOCK_SIZE + _BLK_CAL_KMID
+            km_id = struct.unpack('>I', prog_data[offset:offset+4])[0]
+            ids.append(km_id)
+        return ids
+
+    def test_two_instrument_programs(self):
+        make_wav(self.dir / 'piano.wav')
+        make_wav(self.dir / 'strings.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Piano" instrument\npiano.wav C4\n'
+            '@program "Strings" instrument\nstrings.wav C4\n'
+        )
+        out = self.dir / 'out.for'
+        convert_from_list_file(listfile, out, mode=ConversionMode.INSTRUMENT)
+        parsed = parse_for_file(out.read_bytes())
+        progs = [o for o in parsed['objects'] if o['field0'] == 138]
+        kms = [o for o in parsed['objects'] if o['field0'] == 133]
+        samps = [o for o in parsed['objects'] if o['field0'] == 170]
+        self.assertEqual(len(progs), 2)
+        self.assertEqual(len(kms), 2)
+        self.assertEqual(len(samps), 2)
+        # Each program references a distinct keymap
+        km_ids_0 = self._extract_program_keymap_ids(progs[0]['data'])
+        km_ids_1 = self._extract_program_keymap_ids(progs[1]['data'])
+        self.assertEqual(len(km_ids_0), 1)
+        self.assertEqual(len(km_ids_1), 1)
+        self.assertNotEqual(km_ids_0[0], km_ids_1[0])
+        # Each program's keymap ID matches one of the actual keymap objects
+        all_km_ids = {km['id'] for km in kms}
+        self.assertIn(km_ids_0[0], all_km_ids)
+        self.assertIn(km_ids_1[0], all_km_ids)
+
+    def test_drumset_multi_then_instrument(self):
+        for name in ['kick', 'snare', 'piano']:
+            make_wav(self.dir / f'{name}.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Drums" drumset-multi\n'
+            '@group C2\nkick.wav\n'
+            '@group D2\nsnare.wav\n'
+            '@program "Piano" instrument\npiano.wav C4\n'
+        )
+        out = self.dir / 'out.for'
+        convert_from_list_file(listfile, out)
+        parsed = parse_for_file(out.read_bytes())
+        progs = [o for o in parsed['objects'] if o['field0'] == 138]
+        kms = [o for o in parsed['objects'] if o['field0'] == 133]
+        samps = [o for o in parsed['objects'] if o['field0'] == 170]
+        self.assertEqual(len(progs), 2)
+        self.assertEqual(len(kms), 3)  # 2 drum layers + 1 piano
+        self.assertEqual(len(samps), 3)
+        # Drums program has 2 layers with 2 keymap refs
+        drum_km_ids = self._extract_program_keymap_ids(progs[0]['data'])
+        self.assertEqual(len(drum_km_ids), 2)
+        # Piano program has 1 layer with 1 keymap ref
+        piano_km_ids = self._extract_program_keymap_ids(progs[1]['data'])
+        self.assertEqual(len(piano_km_ids), 1)
+        # Piano's keymap is distinct from drum keymaps
+        self.assertNotIn(piano_km_ids[0], drum_km_ids)
+        # All referenced keymap IDs exist in the file
+        all_km_ids = {km['id'] for km in kms}
+        for kid in drum_km_ids + piano_km_ids:
+            self.assertIn(kid, all_km_ids)
+
+    def test_instrument_then_drumset_multi(self):
+        for name in ['piano', 'kick', 'snare']:
+            make_wav(self.dir / f'{name}.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Piano" instrument\npiano.wav C4\n'
+            '@program "Drums" drumset-multi\n'
+            '@group C2\nkick.wav\n'
+            '@group D2\nsnare.wav\n'
+        )
+        out = self.dir / 'out.for'
+        convert_from_list_file(listfile, out)
+        parsed = parse_for_file(out.read_bytes())
+        progs = [o for o in parsed['objects'] if o['field0'] == 138]
+        kms = [o for o in parsed['objects'] if o['field0'] == 133]
+        samps = [o for o in parsed['objects'] if o['field0'] == 170]
+        self.assertEqual(len(progs), 2)
+        self.assertEqual(len(kms), 3)
+        self.assertEqual(len(samps), 3)
+        piano_km_ids = self._extract_program_keymap_ids(progs[0]['data'])
+        drum_km_ids = self._extract_program_keymap_ids(progs[1]['data'])
+        self.assertEqual(len(piano_km_ids), 1)
+        self.assertEqual(len(drum_km_ids), 2)
+        self.assertNotIn(piano_km_ids[0], drum_km_ids)
+
+    def test_two_drumset_multi_programs(self):
+        for name in ['kick', 'snare', 'conga_lo', 'conga_hi']:
+            make_wav(self.dir / f'{name}.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Kit A" drumset-multi\n'
+            '@group C2\nkick.wav\n'
+            '@group D2\nsnare.wav\n'
+            '@program "Kit B" drumset-multi\n'
+            '@group E2\nconga_lo.wav\n'
+            '@group F2\nconga_hi.wav\n'
+        )
+        out = self.dir / 'out.for'
+        convert_from_list_file(listfile, out)
+        parsed = parse_for_file(out.read_bytes())
+        progs = [o for o in parsed['objects'] if o['field0'] == 138]
+        kms = [o for o in parsed['objects'] if o['field0'] == 133]
+        samps = [o for o in parsed['objects'] if o['field0'] == 170]
+        self.assertEqual(len(progs), 2)
+        self.assertEqual(len(kms), 4)  # 2 + 2
+        self.assertEqual(len(samps), 4)
+        kit_a_km_ids = self._extract_program_keymap_ids(progs[0]['data'])
+        kit_b_km_ids = self._extract_program_keymap_ids(progs[1]['data'])
+        self.assertEqual(len(kit_a_km_ids), 2)
+        self.assertEqual(len(kit_b_km_ids), 2)
+        # No overlap between the two programs' keymaps
+        self.assertFalse(set(kit_a_km_ids) & set(kit_b_km_ids))
+
+
 if __name__ == '__main__':
     unittest.main()

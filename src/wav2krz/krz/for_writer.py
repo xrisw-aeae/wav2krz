@@ -104,18 +104,22 @@ class ForWriter:
     def _write_all_objects(self, f: BinaryIO, sample_index: dict,
                            sample_for_id: dict, keymap_for_id: dict) -> None:
         """Write .for objects: PGM, first KMP, all SMPs, remaining KMPs."""
+        # Build reverse lookup: krz keymap hash -> index in self.keymaps
+        km_hash_to_idx = {km.get_hash(): i for i, km in enumerate(self.keymaps)}
+
         written_keymaps = set()
 
         for i, prog in enumerate(self.programs):
             for_id = FOR_BASE_ID + i
             self._write_for_program(f, prog, for_id, keymap_for_id)
 
-            # Write the first keymap for this program
-            if i < len(self.keymaps):
-                km = self.keymaps[i]
+            # Write the first keymap referenced by this program's CAL segments
+            first_km_idx = self._find_first_keymap_idx(prog, km_hash_to_idx)
+            if first_km_idx is not None:
+                km = self.keymaps[first_km_idx]
                 km_for_id = keymap_for_id[km.get_hash()]
                 self._write_for_keymap(f, km, km_for_id, sample_index)
-                written_keymaps.add(i)
+                written_keymaps.add(first_km_idx)
 
         # Write all samples
         for sample in self.samples:
@@ -127,6 +131,17 @@ class ForWriter:
             if i not in written_keymaps:
                 km_for_id = keymap_for_id[km.get_hash()]
                 self._write_for_keymap(f, km, km_for_id, sample_index)
+
+    def _find_first_keymap_idx(self, prog: KProgram, km_hash_to_idx: dict) -> int | None:
+        """Find the index of the first keymap referenced by a program's CAL segments."""
+        for seg in prog.segments:
+            if seg.tag == Segment.CALSEGTAG:
+                krz_km_id = (seg.data[7] << 8) | seg.data[8]
+                krz_km_hash = KHash.generate(krz_km_id, KHash.T_KEYMAP)
+                idx = km_hash_to_idx.get(krz_km_hash)
+                if idx is not None:
+                    return idx
+        return None
 
     # --- Object framing ---
 
