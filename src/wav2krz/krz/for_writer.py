@@ -3,13 +3,13 @@
 import struct
 from io import BytesIO
 from pathlib import Path
-from typing import BinaryIO, List, Union
+from typing import BinaryIO, List
 
-from .sample import KSample, Soundfilehead, Envelope
-from .keymap import KKeymap, method_to_size
-from .program import KProgram, Segment
-from .hash import KHash
 from .for_templates import build_program_data
+from .hash import KHash
+from .keymap import KKeymap
+from .program import KProgram, Segment
+from .sample import KSample, Soundfilehead
 
 # .for object type field0 values
 FOR_TYPE_PROGRAM = 138
@@ -282,7 +282,8 @@ class ForWriter:
         # Level offsets (same calculation as .krz)
         for j in range(8):
             ofs = (8 - j) * 2
-            ofs += keymap.velocity_mapping[j] * keymap.velocity_levels[keymap.velocity_mapping[j]].get_size()
+            mapped = keymap.velocity_mapping[j]
+            ofs += mapped * keymap.velocity_levels[mapped].get_size()
             f.write(struct.pack('>h', ofs))
 
         # Write velocity level entry data with index-based sample refs
@@ -334,12 +335,24 @@ class ForWriter:
 
     # --- Program serialization (template-based) ---
 
+    @staticmethod
+    def _vel_zone_from_byte(byte_val: int):
+        """Decode velocity zone byte to (lo, hi) 0-based tuple, or None."""
+        if byte_val == 0:
+            return None
+        for lo in range(8):
+            for hi in range(lo, 8):
+                if (lo + 1) * 8 - (hi + 1) == byte_val:
+                    return (lo, hi)
+        return None
+
     def _write_for_program(self, f: BinaryIO, program: KProgram,
                            for_id: int, keymap_for_id: dict) -> None:
         # Count layers and extract layer info from KProgram segments
         layer_count = 0
         keymap_ids = []
         key_ranges = []
+        vel_zones = []
 
         for seg in program.segments:
             if seg.tag == Segment.PGMSEGTAG:
@@ -348,6 +361,7 @@ class ForWriter:
                 lo = seg.data[3]
                 hi = seg.data[4]
                 key_ranges.append((lo, hi))
+                vel_zones.append(self._vel_zone_from_byte(seg.data[5]))
             elif seg.tag == Segment.CALSEGTAG:
                 # Extract .krz keymap ID (BE16 at data[7:9])
                 krz_km_id = (seg.data[7] << 8) | seg.data[8]
@@ -362,7 +376,11 @@ class ForWriter:
         if not keymap_ids:
             keymap_ids = [FOR_BASE_ID]
 
-        data = build_program_data(layer_count, keymap_ids, key_ranges)
+        # Only pass vel_zones if any are non-None
+        vz = vel_zones if any(v is not None for v in vel_zones) else None
+
+        data = build_program_data(layer_count, keymap_ids, key_ranges,
+                                  vel_zones=vz)
 
         self._write_object_header(f, FOR_TYPE_PROGRAM, for_id, program.name, len(data))
         f.write(data)

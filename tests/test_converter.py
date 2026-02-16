@@ -5,11 +5,18 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from wav2krz.converter import (
-    parse_note_name, parse_velocity_range, read_wav_list, read_program_list,
-    convert_wavs_to_krz, convert_from_list_file, ConversionMode, WavEntry,
-    ProgramSection, _build_drum_groups,
+    ConversionMode,
+    WavEntry,
+    _build_drum_groups,
+    convert_from_list_file,
+    convert_wavs_to_krz,
+    parse_note_name,
+    parse_velocity_range,
+    read_program_list,
+    read_wav_list,
 )
 from wav2krz.exceptions import Wav2KrzError
+
 from .helpers import make_wav
 
 
@@ -864,6 +871,319 @@ class TestNamingDefaults(unittest.TestCase):
         )
         sections = read_program_list(listfile)
         self.assertEqual(sections[0].keymap_name, 'Piano Keys')
+
+
+class TestInstrumentMultiMode(unittest.TestCase):
+    """Tests for instrument-multi mode."""
+
+    def setUp(self):
+        self.tmpdir = TemporaryDirectory()
+        self.dir = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_basic_two_layers(self):
+        """Two velocity layers, one sample each."""
+        make_wav(self.dir / 'soft.wav')
+        make_wav(self.dir / 'loud.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Piano" instrument-multi\n'
+            '@layer ppp mp\n'
+            'soft.wav C4\n'
+            '@layer mf fff\n'
+            'loud.wav C4\n'
+        )
+        out = self.dir / 'out.krz'
+        convert_from_list_file(listfile, out, mode=ConversionMode.INSTRUMENT)
+        self.assertTrue(out.exists())
+        self.assertGreater(out.stat().st_size, 32)
+
+    def test_multiple_samples_per_layer(self):
+        """Each layer has multiple samples across the keyboard."""
+        for name in ['soft_lo', 'soft_hi', 'loud_lo', 'loud_hi']:
+            make_wav(self.dir / f'{name}.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Piano" instrument-multi\n'
+            '@layer ppp mp\n'
+            'soft_lo.wav C2 C0 E3\n'
+            'soft_hi.wav C4 F3 G9\n'
+            '@layer mf fff\n'
+            'loud_lo.wav C2 C0 E3\n'
+            'loud_hi.wav C4 F3 G9\n'
+        )
+        out = self.dir / 'out.krz'
+        convert_from_list_file(listfile, out, mode=ConversionMode.INSTRUMENT)
+        self.assertTrue(out.exists())
+
+    def test_four_layers(self):
+        """Four velocity layers."""
+        for name in ['pp', 'mp', 'f', 'ff']:
+            make_wav(self.dir / f'{name}.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Piano" instrument-multi\n'
+            '@layer ppp pp\n'
+            'pp.wav C4\n'
+            '@layer p mp\n'
+            'mp.wav C4\n'
+            '@layer mf f\n'
+            'f.wav C4\n'
+            '@layer ff fff\n'
+            'ff.wav C4\n'
+        )
+        out = self.dir / 'out.krz'
+        convert_from_list_file(listfile, out, mode=ConversionMode.INSTRUMENT)
+        self.assertTrue(out.exists())
+
+    def test_keymap_per_layer(self):
+        """@keymap inside @layer sets per-layer keymap name."""
+        make_wav(self.dir / 'soft.wav')
+        make_wav(self.dir / 'loud.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Piano" instrument-multi\n'
+            '@layer ppp mp\n'
+            '@keymap "Soft"\n'
+            'soft.wav C4\n'
+            '@layer mf fff\n'
+            '@keymap "Loud"\n'
+            'loud.wav C4\n'
+        )
+        sections = read_program_list(listfile)
+        # First two entries should have different keymap names
+        self.assertEqual(sections[0].entries[0].keymap_name, 'Soft')
+        self.assertEqual(sections[0].entries[1].keymap_name, 'Loud')
+
+    def test_vel_zone_in_lyr_segments(self):
+        """LYR segment data[5] has correct velocity zone encoding."""
+        from wav2krz.krz.hash import KHash
+        from wav2krz.krz.keymap import KKeymap
+        from wav2krz.krz.program import Segment, create_multi_layer_program
+
+        # Build two dummy keymaps
+        km1 = KKeymap()
+        km1.set_hash(KHash.generate(200, KHash.T_KEYMAP))
+        km2 = KKeymap()
+        km2.set_hash(KHash.generate(201, KHash.T_KEYMAP))
+
+        prog = create_multi_layer_program(
+            [km1, km2], 200, 'test',
+            stereo_flags=[False, False],
+            key_ranges=[(0, 127), (0, 127)],
+            vel_zones=[(0, 3), (4, 7)])
+
+        lyr_segs = [s for s in prog.segments if s.tag == Segment.LYRSEGTAG]
+        self.assertEqual(len(lyr_segs), 2)
+
+        # ppp-mp: (0+1)*8 - (3+1) = 4
+        self.assertEqual(lyr_segs[0].data[5], 4)
+        # mf-fff: (4+1)*8 - (7+1) = 32
+        self.assertEqual(lyr_segs[1].data[5], 32)
+
+    def test_error_missing_layer(self):
+        """Samples without @layer in instrument-multi should error."""
+        make_wav(self.dir / 'a.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Piano" instrument-multi\n'
+            'a.wav C4\n'
+        )
+        out = self.dir / 'out.krz'
+        with self.assertRaises(Wav2KrzError):
+            convert_from_list_file(listfile, out, mode=ConversionMode.INSTRUMENT)
+
+    def test_single_zone_layer(self):
+        """@layer with single zone name (lo == hi)."""
+        make_wav(self.dir / 'a.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Piano" instrument-multi\n'
+            '@layer mf\n'
+            'a.wav C4\n'
+        )
+        sections = read_program_list(listfile)
+        self.assertEqual(sections[0].entries[0].vel_range, (4, 4))
+
+    def test_hyphenated_zone_layer(self):
+        """@layer with hyphenated range."""
+        make_wav(self.dir / 'a.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Piano" instrument-multi\n'
+            '@layer ppp-mp\n'
+            'a.wav C4\n'
+        )
+        sections = read_program_list(listfile)
+        self.assertEqual(sections[0].entries[0].vel_range, (0, 3))
+
+    def test_layer_alias_in_drumset_multi(self):
+        """@layer works as @group alias in drumset-multi mode."""
+        make_wav(self.dir / 'kick.wav')
+        make_wav(self.dir / 'snare.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@layer C2\nkick.wav\n'
+            '@layer D2\nsnare.wav\n'
+        )
+        out = self.dir / 'out.krz'
+        convert_from_list_file(listfile, out, mode=ConversionMode.DRUMSET_MULTI)
+        self.assertTrue(out.exists())
+        self.assertGreater(out.stat().st_size, 32)
+
+    def test_layer_alias_in_read_wav_list(self):
+        """@layer works as @group alias in read_wav_list."""
+        make_wav(self.dir / 'a.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@layer C2\n'
+            'a.wav\n'
+        )
+        entries = read_wav_list(listfile)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].root_key, 36)  # C2
+
+
+class TestVerboseOutput(unittest.TestCase):
+    """Tests for verbose/quiet output."""
+
+    def setUp(self):
+        self.tmpdir = TemporaryDirectory()
+        self.dir = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _capture(self, func, *args, **kwargs):
+        """Run func and capture stdout."""
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            func(*args, **kwargs)
+        return buf.getvalue()
+
+    def test_verbose_samples_mode(self):
+        """verbose=True prints sample info even in samples-only mode."""
+        make_wav(self.dir / 'kick.wav')
+        out = self.dir / 'out.krz'
+        output = self._capture(
+            convert_wavs_to_krz,
+            [self.dir / 'kick.wav'], out,
+            mode=ConversionMode.SAMPLES, verbose=True)
+        self.assertIn('Sample: kick', output)
+        self.assertIn('mono', output)
+        self.assertIn('Created', output)
+        self.assertIn('1 samples', output)
+
+    def test_quiet_no_output(self):
+        """verbose=False produces no output."""
+        make_wav(self.dir / 'a.wav')
+        out = self.dir / 'out.krz'
+        output = self._capture(
+            convert_wavs_to_krz,
+            [self.dir / 'a.wav'], out,
+            mode=ConversionMode.INSTRUMENT, verbose=False)
+        self.assertEqual(output, '')
+
+    def test_verbose_instrument_mode(self):
+        """verbose=True prints keymap and program info."""
+        make_wav(self.dir / 'a.wav')
+        out = self.dir / 'out.krz'
+        output = self._capture(
+            convert_wavs_to_krz,
+            [self.dir / 'a.wav'], out,
+            mode=ConversionMode.INSTRUMENT, verbose=True)
+        self.assertIn('Sample: a', output)
+        self.assertIn('Keymap:', output)
+        self.assertIn('1 samples', output)
+        self.assertIn('1 keymaps', output)
+        self.assertIn('1 programs', output)
+
+    def test_verbose_stereo(self):
+        """Stereo samples show 'stereo'."""
+        make_wav(self.dir / 'stereo.wav', channels=2)
+        out = self.dir / 'out.krz'
+        output = self._capture(
+            convert_wavs_to_krz,
+            [self.dir / 'stereo.wav'], out,
+            mode=ConversionMode.SAMPLES, verbose=True)
+        self.assertIn('stereo', output)
+
+    def test_verbose_list_file_instrument(self):
+        """verbose=True with list file prints program header."""
+        make_wav(self.dir / 'a.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text('@program "Piano" instrument\na.wav C4\n')
+        out = self.dir / 'out.krz'
+        output = self._capture(
+            convert_from_list_file,
+            listfile, out, mode=ConversionMode.INSTRUMENT, verbose=True)
+        self.assertIn('Program "Piano" (instrument)', output)
+        self.assertIn('Sample: a', output)
+        self.assertIn('Keymap:', output)
+        self.assertIn('Created', output)
+
+    def test_quiet_list_file(self):
+        """verbose=False with list file produces no output."""
+        make_wav(self.dir / 'a.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text('@program "Piano" instrument\na.wav C4\n')
+        out = self.dir / 'out.krz'
+        output = self._capture(
+            convert_from_list_file,
+            listfile, out, mode=ConversionMode.INSTRUMENT, verbose=False)
+        self.assertEqual(output, '')
+
+    def test_verbose_instrument_multi(self):
+        """instrument-multi prints layer info with velocity zones."""
+        make_wav(self.dir / 'soft.wav')
+        make_wav(self.dir / 'loud.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Piano" instrument-multi\n'
+            '@layer ppp mp\nsoft.wav C4\n'
+            '@layer mf fff\nloud.wav C4\n'
+        )
+        out = self.dir / 'out.krz'
+        output = self._capture(
+            convert_from_list_file,
+            listfile, out, mode=ConversionMode.INSTRUMENT, verbose=True)
+        self.assertIn('Program "Piano" (instrument-multi)', output)
+        self.assertIn('Layer 1:', output)
+        self.assertIn('Layer 2:', output)
+        self.assertIn('vel ppp-mp', output)
+        self.assertIn('vel mf-fff', output)
+
+    def test_verbose_summary_counts(self):
+        """Summary line has correct counts for multi-program file."""
+        make_wav(self.dir / 'a.wav')
+        make_wav(self.dir / 'b.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "P1" instrument\na.wav C4\n'
+            '@program "P2" instrument\nb.wav C4\n'
+        )
+        out = self.dir / 'out.krz'
+        output = self._capture(
+            convert_from_list_file,
+            listfile, out, mode=ConversionMode.INSTRUMENT, verbose=True)
+        self.assertIn('2 samples', output)
+        self.assertIn('2 keymaps', output)
+        self.assertIn('2 programs', output)
+
+    def test_verbose_default_true(self):
+        """verbose defaults to True (output is produced without explicit flag)."""
+        make_wav(self.dir / 'a.wav')
+        out = self.dir / 'out.krz'
+        output = self._capture(
+            convert_wavs_to_krz,
+            [self.dir / 'a.wav'], out,
+            mode=ConversionMode.INSTRUMENT)
+        self.assertIn('Sample: a', output)
+        self.assertIn('Created', output)
 
 
 if __name__ == '__main__':

@@ -1,8 +1,12 @@
 """Kurzweil .krz file format module."""
 
-from .header import KrzHeader
-from .sample import KSample, Soundfilehead, Envelope
-from .keymap import KKeymap, VeloLevel, KeymapEntry
-from .program import KProgram
-from .hash import KHash
-from .writer import KrzWriter
+from .hash import KHash as KHash
+from .header import KrzHeader as KrzHeader
+from .keymap import KeymapEntry as KeymapEntry
+from .keymap import KKeymap as KKeymap
+from .keymap import VeloLevel as VeloLevel
+from .program import KProgram as KProgram
+from .sample import Envelope as Envelope
+from .sample import KSample as KSample
+from .sample import Soundfilehead as Soundfilehead
+from .writer import KrzWriter as KrzWriter

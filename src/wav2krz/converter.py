@@ -6,12 +6,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from .wav.parser import parse_wav, WavFile
-from .krz.writer import KrzWriter
+from .exceptions import Wav2KrzError
 from .krz.for_writer import ForWriter
-from .krz.sample import create_sample_from_wav, KSample
-from .krz.keymap import create_instrument_keymap, create_drumset_keymap, KKeymap
-from .krz.program import create_program, create_multi_layer_program, KProgram
+from .krz.keymap import create_drumset_keymap, create_instrument_keymap
+from .krz.program import create_multi_layer_program, create_program
+from .krz.sample import KSample, create_sample_from_wav
+from .krz.writer import KrzWriter
+from .wav.parser import parse_wav
 
 # Output extension to program mode mapping
 FORMAT_MODES = {
@@ -20,13 +21,34 @@ FORMAT_MODES = {
     '.k26': 4,  # K2600
     '.for': 4,  # Forte/PC3 (uses K2600 program segments internally)
 }
-from .exceptions import Wav2KrzError
+
+# Note names for MIDI-to-note conversion
+_NOTE_LETTERS = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+
+# Velocity zone index to name
+_VEL_ZONE_NAMES = ['ppp', 'pp', 'p', 'mp', 'mf', 'f', 'ff', 'fff']
+
+
+def _midi_to_note(midi: int) -> str:
+    """Convert MIDI note number to note name. 60 -> 'C4', 36 -> 'C2'."""
+    octave = (midi // 12) - 1
+    note = _NOTE_LETTERS[midi % 12]
+    return f"{note}{octave}"
+
+
+def _vel_zone_name(zone: tuple) -> str:
+    """Convert velocity zone tuple to display string. (0,3) -> 'ppp-mp', (4,4) -> 'mf'."""
+    lo, hi = zone
+    if lo == hi:
+        return _VEL_ZONE_NAMES[lo]
+    return f"{_VEL_ZONE_NAMES[lo]}-{_VEL_ZONE_NAMES[hi]}"
 
 
 class ConversionMode:
     """Conversion mode constants."""
     SAMPLES = "samples"
     INSTRUMENT = "instrument"
+    INSTRUMENT_MULTI = "instrument-multi"
     DRUMSET = "drumset"
     DRUMSET_MULTI = "drumset-multi"
 
@@ -63,6 +85,14 @@ class DrumGroup:
     sample_indices: List[int]  # Indices into the original entries list
     vel_layer_map: Optional[dict] = None  # {(start, end): [local_indices...]}
     keymap_name: Optional[str] = None  # Per-group keymap name (from @keymap)
+
+
+@dataclass
+class InstrumentLayer:
+    """A velocity layer in instrument-multi mode."""
+    vel_zone: Tuple[int, int]  # (lo_zone, hi_zone) 0-based 0-7
+    sample_indices: List[int]  # Indices into the section's entries list
+    keymap_name: Optional[str] = None  # Per-layer keymap name
 
 
 @dataclass
@@ -142,6 +172,105 @@ def _build_drum_groups(entries: List[WavEntry]) -> List[DrumGroup]:
         ))
 
     return groups
+
+
+def _parse_layer_vel_header(parts: List[str], line_num: int) -> Tuple[int, int]:
+    """Parse @layer velocity zone header for instrument-multi mode.
+
+    Formats:
+        @layer ppp mp       Two separate zone names
+        @layer ppp-mp       Hyphenated range
+        @layer mf           Single zone (lo == hi)
+
+    Args:
+        parts: Split line parts (after @layer keyword)
+        line_num: Line number for error messages
+
+    Returns:
+        (lo_zone, hi_zone) as 0-based indices (0-7)
+    """
+    if not parts:
+        raise Wav2KrzError(
+            f"@layer requires velocity zone(s) on line {line_num}. "
+            f"Expected: @layer lo_vel [hi_vel] (e.g., @layer ppp mp)"
+        )
+
+    if len(parts) == 1:
+        # Could be "ppp-mp" (hyphenated) or "mf" (single zone)
+        result = parse_velocity_range(parts[0])
+        if result is None:
+            raise Wav2KrzError(
+                f"Invalid velocity zone '{parts[0]}' in @layer on line {line_num}. "
+                f"Expected zone name (ppp, pp, p, mp, mf, f, ff, fff) or range (ppp-mp)."
+            )
+        return result
+    elif len(parts) == 2:
+        lo_idx = VELOCITY_NAMES.get(parts[0].upper())
+        hi_idx = VELOCITY_NAMES.get(parts[1].upper())
+        if lo_idx is None:
+            raise Wav2KrzError(
+                f"Invalid velocity zone '{parts[0]}' in @layer on line {line_num}."
+            )
+        if hi_idx is None:
+            raise Wav2KrzError(
+                f"Invalid velocity zone '{parts[1]}' in @layer on line {line_num}."
+            )
+        if lo_idx > hi_idx:
+            raise Wav2KrzError(
+                f"lo_vel ({parts[0]}) must be <= hi_vel ({parts[1]}) "
+                f"in @layer on line {line_num}."
+            )
+        return (lo_idx, hi_idx)
+    else:
+        raise Wav2KrzError(
+            f"Too many parameters in @layer on line {line_num}. "
+            f"Expected: @layer lo_vel [hi_vel]"
+        )
+
+
+def _build_instrument_multi_layers(entries: List[WavEntry]) -> List[InstrumentLayer]:
+    """Group WavEntries by vel_range for instrument-multi mode.
+
+    Each unique vel_range becomes one layer. All entries must have vel_range set
+    (from an @layer directive).
+
+    Args:
+        entries: List of WavEntry (all must have vel_range set)
+
+    Returns:
+        List of InstrumentLayer sorted by vel_zone (ascending)
+
+    Raises:
+        Wav2KrzError: If entries lack vel_range or exceed 32 layers
+    """
+    layers_by_vel = {}  # vel_range -> list of (original_index, entry)
+    for i, entry in enumerate(entries):
+        if entry.vel_range is None:
+            raise Wav2KrzError(
+                f"All samples in instrument-multi mode must be under a @layer "
+                f"directive. Sample '{entry.path.name}' (index {i}) has no "
+                f"velocity zone."
+            )
+        layers_by_vel.setdefault(entry.vel_range, []).append((i, entry))
+
+    if len(layers_by_vel) > 32:
+        raise Wav2KrzError(
+            f"Too many layers ({len(layers_by_vel)}). "
+            f"Kurzweil supports a maximum of 32 layers per program."
+        )
+
+    layers = []
+    for vel_range in sorted(layers_by_vel.keys()):
+        members = layers_by_vel[vel_range]
+        sample_indices = [idx for idx, _ in members]
+        layer_keymap_name = members[0][1].keymap_name
+        layers.append(InstrumentLayer(
+            vel_zone=vel_range,
+            sample_indices=sample_indices,
+            keymap_name=layer_keymap_name,
+        ))
+
+    return layers
 
 
 def parse_velocity_range(spec: str) -> Optional[Tuple[int, int]]:
@@ -444,8 +573,8 @@ def read_wav_list(list_file: Path) -> List[WavEntry]:
             if not parts:
                 continue
 
-            # Check for @group directive
-            if parts[0].lower() == '@group':
+            # Check for @group/@layer directive
+            if parts[0].lower() in ('@group', '@layer'):
                 current_group = _parse_group_header(parts[1:], line_num)
                 continue
 
@@ -459,6 +588,7 @@ def read_wav_list(list_file: Path) -> List[WavEntry]:
 _VALID_MODES = {
     ConversionMode.SAMPLES,
     ConversionMode.INSTRUMENT,
+    ConversionMode.INSTRUMENT_MULTI,
     ConversionMode.DRUMSET,
     ConversionMode.DRUMSET_MULTI,
 }
@@ -480,7 +610,7 @@ def _parse_directive_name(line: str, directive: str, line_num: int) -> List[str]
     return tokens[1:]
 
 
-def read_program_list(list_file: Path) -> List[ProgramSection]:
+def read_program_list(list_file: Path, cli_mode: str = None) -> List[ProgramSection]:
     """
     Read a list file with optional @program and @keymap directives.
 
@@ -489,8 +619,10 @@ def read_program_list(list_file: Path) -> List[ProgramSection]:
 
     Directives:
         @program "Name" [mode]  — start a new program section
-        @keymap "Name"          — name the keymap (section-level or per-group)
+        @keymap "Name"          — name the keymap (section-level or per-group/layer)
         @group root [lo hi]     — start a drum group (resets per-group keymap)
+        @layer ...              — alias for @group; in instrument-multi mode,
+                                  takes velocity zones: @layer lo_vel [hi_vel]
 
     Args:
         list_file: Path to text file
@@ -499,8 +631,9 @@ def read_program_list(list_file: Path) -> List[ProgramSection]:
         List of ProgramSection objects
     """
     sections = []
-    current_section = ProgramSection()
-    current_group = None
+    current_section = ProgramSection(mode=cli_mode)
+    current_group = None  # Key-based group context (drumset-multi, etc.)
+    current_layer_vel = None  # Velocity layer context (instrument-multi)
     group_keymap_name = None
 
     with open(list_file, 'r') as f:
@@ -541,6 +674,7 @@ def read_program_list(list_file: Path) -> List[ProgramSection]:
                     )
                 current_section = ProgramSection(name=prog_name, mode=prog_mode)
                 current_group = None
+                current_layer_vel = None
                 group_keymap_name = None
                 continue
 
@@ -556,21 +690,34 @@ def read_program_list(list_file: Path) -> List[ProgramSection]:
                         f"Expected: @keymap \"Name\""
                     )
                 km_name = args[0]
-                if current_group is not None:
-                    # Inside a @group: set per-group keymap name
+                if current_group is not None or current_layer_vel is not None:
+                    # Inside a @group/@layer: set per-group/layer keymap name
                     group_keymap_name = km_name
                 else:
                     # Section level: set default keymap name
                     current_section.keymap_name = km_name
                 continue
 
-            if keyword == '@group':
-                current_group = _parse_group_header(parts[1:], line_num)
-                group_keymap_name = None  # Reset per-group keymap name
+            if keyword in ('@group', '@layer'):
+                if current_section.mode == ConversionMode.INSTRUMENT_MULTI:
+                    # In instrument-multi: parse velocity zone args
+                    current_layer_vel = _parse_layer_vel_header(parts[1:], line_num)
+                    current_group = None
+                else:
+                    # In other modes: parse note name args (existing behavior)
+                    current_group = _parse_group_header(parts[1:], line_num)
+                    current_layer_vel = None
+                group_keymap_name = None
                 continue
 
             # Sample line
-            entry = _parse_sample_line(parts, line_num, list_file, current_group)
+            if current_layer_vel is not None:
+                # Inside @layer in instrument-multi: parse as ungrouped,
+                # then apply velocity zone from @layer
+                entry = _parse_sample_line(parts, line_num, list_file, group=None)
+                entry.vel_range = current_layer_vel
+            else:
+                entry = _parse_sample_line(parts, line_num, list_file, current_group)
             if group_keymap_name is not None:
                 entry.keymap_name = group_keymap_name
             current_section.entries.append(entry)
@@ -593,7 +740,8 @@ def convert_wavs_to_krz(
     root_keys: Optional[List[Optional[int]]] = None,
     vel_ranges: Optional[List[Optional[Tuple[int, int]]]] = None,
     key_ranges: Optional[List[Optional[Tuple[int, int]]]] = None,
-    entries: Optional[List[WavEntry]] = None
+    entries: Optional[List[WavEntry]] = None,
+    verbose: bool = True
 ) -> None:
     """
     Convert WAV files to Kurzweil .krz format.
@@ -642,7 +790,7 @@ def convert_wavs_to_krz(
         # Use WAV filename (without extension) as sample name
         sample_name = wav_path.stem[:16]
 
-        # Determine root key (priority: global override > per-sample > drumset position > WAV metadata > default)
+        # Determine root key: global override > per-sample > drumset > default
         if root_key is not None:
             sample_root_key = root_key
         elif root_keys is not None and i < len(root_keys) and root_keys[i] is not None:
@@ -659,11 +807,18 @@ def convert_wavs_to_krz(
         writer.add_sample(sample)
         sample_id += 1
 
+        if verbose:
+            stereo_str = "stereo" if sample.is_stereo() else "mono"
+            print(f"  Sample: {sample_name} ({_midi_to_note(sample_root_key)}, {stereo_str})")
+
         # Track velocity range for this sample
         vr = None
         if vel_ranges is not None and i < len(vel_ranges):
             vr = vel_ranges[i]
         sample_vel_ranges.append(vr)
+
+    num_keymaps = 0
+    num_programs = 0
 
     # Create keymap and program based on mode
     if mode in (ConversionMode.INSTRUMENT, ConversionMode.DRUMSET):
@@ -711,10 +866,15 @@ def convert_wavs_to_krz(
                 key_ranges=key_ranges)
 
         writer.add_keymap(keymap)
+        num_keymaps = 1
+
+        if verbose:
+            print(f"  Keymap: {base_name} ({len(samples)} samples)")
 
         pgm_mode = FORMAT_MODES.get(output_path.suffix.lower(), 2)
         program = create_program(keymap, program_id, base_name, has_stereo, mode=pgm_mode)
         writer.add_program(program)
+        num_programs = 1
 
     elif mode == ConversionMode.DRUMSET_MULTI:
         # Build entries if not provided (construct from flat lists)
@@ -752,6 +912,11 @@ def convert_wavs_to_krz(
             keymaps.append(km)
             writer.add_keymap(km)
 
+            if verbose:
+                print(f"  Keymap: {base_name} ({len(group_samples)} samples)")
+
+        num_keymaps = len(keymaps)
+
         program_id = start_id
         program = create_multi_layer_program(
             keymaps, program_id, base_name,
@@ -759,9 +924,24 @@ def convert_wavs_to_krz(
             key_ranges=layer_key_ranges,
             mode=pgm_mode)
         writer.add_program(program)
+        num_programs = 1
+
+        if verbose:
+            for layer_num, group in enumerate(groups, 1):
+                lo_note = _midi_to_note(group.lo_key)
+                hi_note = _midi_to_note(group.hi_key)
+                print(f"  Layer {layer_num}: {base_name}, keys {lo_note}..{hi_note}")
 
     # Write the .krz file
     writer.write(output_path)
+
+    if verbose:
+        parts = [f"{len(samples)} samples"]
+        if num_keymaps:
+            parts.append(f"{num_keymaps} keymaps")
+        if num_programs:
+            parts.append(f"{num_programs} programs")
+        print(f"Created {output_path} ({', '.join(parts)})")
 
 
 def _process_section(
@@ -775,6 +955,7 @@ def _process_section(
     cli_name: Optional[str],
     cli_root_key: Optional[int],
     cli_start_key: int,
+    verbose: bool = True,
 ) -> Tuple[int, int, int]:
     """
     Process a single ProgramSection, adding objects to the writer.
@@ -790,6 +971,7 @@ def _process_section(
         cli_name: CLI name fallback
         cli_root_key: CLI root key override
         cli_start_key: Starting key for drumset modes
+        verbose: Print verbose output
 
     Returns:
         Tuple of (next_sample_id, next_keymap_id, next_program_id)
@@ -803,6 +985,9 @@ def _process_section(
     program_name = section.name or cli_name or output_path.stem[:16]
     # Keymap name: section keymap_name > program name
     default_keymap_name = section.keymap_name or program_name
+
+    if verbose and mode != ConversionMode.SAMPLES:
+        print(f'Program "{program_name}" ({mode}):')
 
     wav_files = [e.path for e in entries]
     root_keys = [e.root_key for e in entries]
@@ -843,6 +1028,10 @@ def _process_section(
         samples.append(sample)
         writer.add_sample(sample)
         sample_id += 1
+
+        if verbose:
+            stereo_str = "stereo" if sample.is_stereo() else "mono"
+            print(f"  Sample: {sample_name} ({_midi_to_note(sample_root_key)}, {stereo_str})")
 
         vr = vel_ranges[i]
         sample_vel_ranges.append(vr)
@@ -891,6 +1080,9 @@ def _process_section(
         writer.add_keymap(keymap)
         next_keymap_id = keymap_id + 1
 
+        if verbose:
+            print(f"  Keymap: {base_name} ({len(samples)} samples)")
+
         pgm_mode = FORMAT_MODES.get(output_path.suffix.lower(), 2)
         program = create_program(
             keymap, program_id, program_name, has_stereo, mode=pgm_mode)
@@ -922,6 +1114,9 @@ def _process_section(
             keymaps.append(km)
             writer.add_keymap(km)
 
+            if verbose:
+                print(f"  Keymap: {km_name} ({len(group_samples)} samples)")
+
         next_keymap_id += len(groups)
 
         program_id = next_program_id
@@ -933,6 +1128,69 @@ def _process_section(
         writer.add_program(program)
         next_program_id = program_id + 1
 
+        if verbose:
+            for layer_num, group in enumerate(groups, 1):
+                lo_note = _midi_to_note(group.lo_key)
+                hi_note = _midi_to_note(group.hi_key)
+                km = group.keymap_name or default_keymap_name
+                print(f"  Layer {layer_num}: {km}, keys {lo_note}..{hi_note}")
+
+    elif mode == ConversionMode.INSTRUMENT_MULTI:
+        layers = _build_instrument_multi_layers(entries)
+        pgm_mode = FORMAT_MODES.get(output_path.suffix.lower(), 2)
+
+        keymaps = []
+        stereo_flags = []
+        layer_key_ranges = []
+        layer_vel_zones = []
+
+        for layer_idx, layer in enumerate(layers):
+            layer_samples = [samples[i] for i in layer.sample_indices]
+            keymap_id = next_keymap_id + layer_idx
+
+            has_layer_stereo = any(s.is_stereo() for s in layer_samples)
+            stereo_flags.append(has_layer_stereo)
+            layer_key_ranges.append((0, 127))  # Full keyboard per layer
+            layer_vel_zones.append(layer.vel_zone)
+
+            # Per-sample key ranges within this layer
+            layer_sample_key_ranges = [
+                (entries[i].lo_key, entries[i].hi_key)
+                if entries[i].lo_key is not None else None
+                for i in layer.sample_indices
+            ]
+
+            km_name = layer.keymap_name or default_keymap_name
+
+            km = create_instrument_keymap(
+                layer_samples, keymap_id, km_name,
+                key_ranges=layer_sample_key_ranges)
+            keymaps.append(km)
+            writer.add_keymap(km)
+
+            if verbose:
+                print(f"  Keymap: {km_name} ({len(layer_samples)} samples)")
+
+        next_keymap_id += len(layers)
+
+        program_id = next_program_id
+        program = create_multi_layer_program(
+            keymaps, program_id, program_name,
+            stereo_flags=stereo_flags,
+            key_ranges=layer_key_ranges,
+            vel_zones=layer_vel_zones,
+            mode=pgm_mode)
+        writer.add_program(program)
+        next_program_id = program_id + 1
+
+        if verbose:
+            for layer_num, layer in enumerate(layers, 1):
+                km_name = layer.keymap_name or default_keymap_name
+                lo_note = _midi_to_note(layer_key_ranges[layer_num - 1][0])
+                hi_note = _midi_to_note(layer_key_ranges[layer_num - 1][1])
+                vel_str = _vel_zone_name(layer.vel_zone)
+                print(f"  Layer {layer_num}: {km_name}, keys {lo_note}..{hi_note}, vel {vel_str}")
+
     return next_sample_id, next_keymap_id, next_program_id
 
 
@@ -943,7 +1201,8 @@ def convert_from_list_file(
     start_key: int = 36,
     start_id: int = 200,
     name: Optional[str] = None,
-    root_key: Optional[int] = None
+    root_key: Optional[int] = None,
+    verbose: bool = True
 ) -> None:
     """
     Convert WAV files listed in a text file to .krz format.
@@ -959,8 +1218,9 @@ def convert_from_list_file(
         start_id: Starting object ID
         name: Base name for keymap/program
         root_key: Global root key override (overrides per-sample keys from file)
+        verbose: Print verbose output (default True)
     """
-    sections = read_program_list(list_file)
+    sections = read_program_list(list_file, cli_mode=mode)
 
     if not sections:
         raise Wav2KrzError("No entries found in list file")
@@ -977,6 +1237,18 @@ def convert_from_list_file(
         next_sample_id, next_keymap_id, next_program_id = _process_section(
             section, writer, next_sample_id, next_keymap_id, next_program_id,
             output_path, cli_mode=mode, cli_name=name,
-            cli_root_key=root_key, cli_start_key=start_key)
+            cli_root_key=root_key, cli_start_key=start_key,
+            verbose=verbose)
 
     writer.write(output_path)
+
+    if verbose:
+        num_samples = next_sample_id - start_id
+        num_keymaps = next_keymap_id - start_id
+        num_programs = next_program_id - start_id
+        parts = [f"{num_samples} samples"]
+        if num_keymaps:
+            parts.append(f"{num_keymaps} keymaps")
+        if num_programs:
+            parts.append(f"{num_programs} programs")
+        print(f"Created {output_path} ({', '.join(parts)})")

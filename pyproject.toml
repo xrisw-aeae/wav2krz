@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wav2krz"
-version = "1.0.0"
+version = "0.7.0"
 description = "Convert WAV files to Kurzweil .krz/.k25/.k26/.for format"
 requires-python = ">=3.10"
 
@@ -16,3 +16,10 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]

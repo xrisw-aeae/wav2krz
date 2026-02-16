@@ -1,19 +1,14 @@
 """Tests for KRZ data structures: hash, header, sample, envelope, program."""
 
 import io
-import struct
 import unittest
 
 from wav2krz.krz.hash import KHash
 from wav2krz.krz.header import KrzHeader
-from wav2krz.krz.sample import (
-    KSample, Soundfilehead, Envelope, swap_bytes, create_sample_from_wav
-)
-from wav2krz.krz.keymap import create_instrument_keymap, KKeymap
-from wav2krz.krz.program import (
-    KProgram, Segment, create_program, create_multi_layer_program
-)
-from wav2krz.wav.parser import WavFile, SampleInfo
+from wav2krz.krz.keymap import create_instrument_keymap
+from wav2krz.krz.program import KProgram, Segment, create_multi_layer_program
+from wav2krz.krz.sample import Envelope, KSample, Soundfilehead, create_sample_from_wav, swap_bytes
+from wav2krz.wav.parser import SampleInfo, WavFile
 
 
 class TestKHash(unittest.TestCase):

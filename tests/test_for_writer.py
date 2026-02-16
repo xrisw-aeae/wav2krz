@@ -6,19 +6,34 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from wav2krz.converter import (
-    convert_wavs_to_krz, convert_from_list_file, ConversionMode, WavEntry,
+    ConversionMode,
+    WavEntry,
+    convert_from_list_file,
+    convert_wavs_to_krz,
 )
 from wav2krz.krz.for_templates import (
-    PROGRAM_1LAYER, PROGRAM_2LAYER, patch_program_template,
+    _BLK_CAL_KMID,
+    _BLK_FINAL_MARKER,
+    _BLK_HIKEY,
+    _BLK_LAYER_IDX,
+    _BLK_LOKEY,
+    _BLK_VEL_ZONE,
+    L1_CAL_KMID2_OFFSET,
+    L1_CAL_KMID_OFFSET,
+    L1_LYR_HIKEY_OFFSET,
+    L1_LYR_LOKEY_OFFSET,
+    L2_CAL_KMID_OFFSET,
+    L2_LYR_HIKEY_OFFSET,
+    L2_LYR_LOKEY_OFFSET,
+    LAYER_BLOCK_SIZE,
+    LAYER_BLOCK_START,
+    LAYER_COUNT_OFFSET,
+    PROGRAM_1LAYER,
+    PROGRAM_2LAYER,
     build_program_data,
-    LAYER_COUNT_OFFSET, LAYER_BLOCK_START, LAYER_BLOCK_SIZE,
-    L1_LYR_LOKEY_OFFSET, L1_LYR_HIKEY_OFFSET,
-    L1_CAL_KMID_OFFSET, L1_CAL_KMID2_OFFSET,
-    L2_LYR_LOKEY_OFFSET, L2_LYR_HIKEY_OFFSET,
-    L2_CAL_KMID_OFFSET, L2_CAL_KMID2_OFFSET,
-    _BLK_LOKEY, _BLK_HIKEY, _BLK_CAL_KMID, _BLK_CAL_KMID2,
-    _BLK_LAYER_IDX, _BLK_FINAL_MARKER,
+    patch_program_template,
 )
+
 from .helpers import make_wav
 
 
@@ -93,8 +108,10 @@ class TestForTemplates(unittest.TestCase):
         self.assertEqual(patched[LAYER_COUNT_OFFSET], 1)
         self.assertEqual(patched[L1_LYR_LOKEY_OFFSET], 24)
         self.assertEqual(patched[L1_LYR_HIKEY_OFFSET], 96)
-        self.assertEqual(struct.unpack('>I', patched[L1_CAL_KMID_OFFSET:L1_CAL_KMID_OFFSET+4])[0], 2048)
-        self.assertEqual(struct.unpack('>I', patched[L1_CAL_KMID2_OFFSET:L1_CAL_KMID2_OFFSET+4])[0], 2048)
+        kmid = struct.unpack('>I', patched[L1_CAL_KMID_OFFSET:L1_CAL_KMID_OFFSET+4])[0]
+        self.assertEqual(kmid, 2048)
+        kmid2 = struct.unpack('>I', patched[L1_CAL_KMID2_OFFSET:L1_CAL_KMID2_OFFSET+4])[0]
+        self.assertEqual(kmid2, 2048)
 
     def test_patch_2layer(self):
         patched = patch_program_template(
@@ -103,10 +120,12 @@ class TestForTemplates(unittest.TestCase):
         self.assertEqual(patched[LAYER_COUNT_OFFSET], 2)
         self.assertEqual(patched[L1_LYR_LOKEY_OFFSET], 0)
         self.assertEqual(patched[L1_LYR_HIKEY_OFFSET], 60)
-        self.assertEqual(struct.unpack('>I', patched[L1_CAL_KMID_OFFSET:L1_CAL_KMID_OFFSET+4])[0], 1024)
+        kmid = struct.unpack('>I', patched[L1_CAL_KMID_OFFSET:L1_CAL_KMID_OFFSET+4])[0]
+        self.assertEqual(kmid, 1024)
         self.assertEqual(patched[L2_LYR_LOKEY_OFFSET], 61)
         self.assertEqual(patched[L2_LYR_HIKEY_OFFSET], 127)
-        self.assertEqual(struct.unpack('>I', patched[L2_CAL_KMID_OFFSET:L2_CAL_KMID_OFFSET+4])[0], 1025)
+        kmid = struct.unpack('>I', patched[L2_CAL_KMID_OFFSET:L2_CAL_KMID_OFFSET+4])[0]
+        self.assertEqual(kmid, 1025)
 
     def test_build_3layer(self):
         data = build_program_data(
@@ -164,6 +183,50 @@ class TestForTemplates(unittest.TestCase):
         patched = patch_program_template(
             PROGRAM_2LAYER, 2, [1024, 1025], [(0, 60), (61, 127)])
         self.assertEqual(data, patched)
+
+    def test_build_1layer_vel_zone(self):
+        """build_program_data patches vel_zone for 1-layer case."""
+        data = build_program_data(
+            1, keymap_ids=[1024], key_ranges=[(0, 127)],
+            vel_zones=[(0, 3)])
+        # ppp-mp: (0+1)*8 - (3+1) = 4
+        self.assertEqual(data[LAYER_BLOCK_START + _BLK_VEL_ZONE], 4)
+
+    def test_build_2layer_vel_zones(self):
+        """build_program_data patches vel_zones for 2-layer case."""
+        data = build_program_data(
+            2, keymap_ids=[1024, 1025], key_ranges=[(0, 127), (0, 127)],
+            vel_zones=[(0, 3), (4, 7)])
+        # Layer 0: ppp-mp = 4
+        blk0 = LAYER_BLOCK_START
+        self.assertEqual(data[blk0 + _BLK_VEL_ZONE], 4)
+        # Layer 1: mf-fff = 32
+        blk1 = LAYER_BLOCK_START + LAYER_BLOCK_SIZE
+        self.assertEqual(data[blk1 + _BLK_VEL_ZONE], 32)
+
+    def test_build_3layer_vel_zones(self):
+        """build_program_data patches vel_zones for 3-layer case."""
+        data = build_program_data(
+            3, keymap_ids=[1024, 1025, 1026],
+            key_ranges=[(0, 127)] * 3,
+            vel_zones=[(0, 2), (3, 4), (5, 7)])
+        expected = [
+            (0 + 1) * 8 - (2 + 1),  # ppp-p = 5
+            (3 + 1) * 8 - (4 + 1),  # mp-mf = 27
+            (5 + 1) * 8 - (7 + 1),  # f-fff = 40
+        ]
+        for i, exp in enumerate(expected):
+            blk = LAYER_BLOCK_START + i * LAYER_BLOCK_SIZE
+            self.assertEqual(data[blk + _BLK_VEL_ZONE], exp)
+
+    def test_build_no_vel_zones_leaves_default(self):
+        """Without vel_zones, the vel_zone byte stays at default (0)."""
+        data = build_program_data(
+            2, keymap_ids=[1024, 1025], key_ranges=[(0, 60), (61, 127)])
+        blk0 = LAYER_BLOCK_START
+        blk1 = LAYER_BLOCK_START + LAYER_BLOCK_SIZE
+        self.assertEqual(data[blk0 + _BLK_VEL_ZONE], 0)
+        self.assertEqual(data[blk1 + _BLK_VEL_ZONE], 0)
 
 
 class TestForWriterFileStructure(unittest.TestCase):
@@ -519,6 +582,100 @@ class TestForWriterEndToEnd(unittest.TestCase):
             stereo = struct.unpack('>H', samp['data'][6:8])[0]
             self.assertEqual(stereo, 1)
             self.assertEqual(len(samp['data']), 176)
+
+
+class TestForWriterInstrumentMulti(unittest.TestCase):
+    """Tests for instrument-multi mode .for output with velocity zones."""
+
+    def setUp(self):
+        self.tmpdir = TemporaryDirectory()
+        self.dir = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_instrument_multi_for_output(self):
+        """instrument-multi produces correct .for with vel_zone bytes."""
+        make_wav(self.dir / 'soft.wav')
+        make_wav(self.dir / 'loud.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Piano" instrument-multi\n'
+            '@layer ppp mp\n'
+            'soft.wav C4\n'
+            '@layer mf fff\n'
+            'loud.wav C4\n'
+        )
+        out = self.dir / 'out.for'
+        convert_from_list_file(listfile, out, mode=ConversionMode.INSTRUMENT)
+        parsed = parse_for_file(out.read_bytes())
+        progs = [o for o in parsed['objects'] if o['field0'] == 138]
+        kms = [o for o in parsed['objects'] if o['field0'] == 133]
+        samps = [o for o in parsed['objects'] if o['field0'] == 170]
+        self.assertEqual(len(progs), 1)
+        self.assertEqual(len(kms), 2)
+        self.assertEqual(len(samps), 2)
+        # Program has 2 layers
+        pd = progs[0]['data']
+        self.assertEqual(pd[LAYER_COUNT_OFFSET], 2)
+        # Layer 0 vel_zone: ppp-mp = 4
+        blk0 = LAYER_BLOCK_START
+        self.assertEqual(pd[blk0 + _BLK_VEL_ZONE], 4)
+        # Layer 1 vel_zone: mf-fff = 32
+        blk1 = LAYER_BLOCK_START + LAYER_BLOCK_SIZE
+        self.assertEqual(pd[blk1 + _BLK_VEL_ZONE], 32)
+
+    def test_instrument_multi_four_layers_for(self):
+        """4-layer instrument-multi .for output."""
+        for name in ['pp', 'mp', 'f', 'fff']:
+            make_wav(self.dir / f'{name}.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Vel4" instrument-multi\n'
+            '@layer ppp pp\n'
+            'pp.wav C4\n'
+            '@layer p mp\n'
+            'mp.wav C4\n'
+            '@layer mf f\n'
+            'f.wav C4\n'
+            '@layer ff fff\n'
+            'fff.wav C4\n'
+        )
+        out = self.dir / 'out.for'
+        convert_from_list_file(listfile, out, mode=ConversionMode.INSTRUMENT)
+        parsed = parse_for_file(out.read_bytes())
+        pd = [o for o in parsed['objects'] if o['field0'] == 138][0]['data']
+        self.assertEqual(pd[LAYER_COUNT_OFFSET], 4)
+        expected_vel = [
+            (0 + 1) * 8 - (1 + 1),  # ppp-pp = 6
+            (2 + 1) * 8 - (3 + 1),  # p-mp = 20
+            (4 + 1) * 8 - (5 + 1),  # mf-f = 34
+            (6 + 1) * 8 - (7 + 1),  # ff-fff = 48
+        ]
+        for i, exp in enumerate(expected_vel):
+            blk = LAYER_BLOCK_START + i * LAYER_BLOCK_SIZE
+            self.assertEqual(pd[blk + _BLK_VEL_ZONE], exp)
+
+    def test_instrument_multi_full_keyboard(self):
+        """All layers in instrument-multi have full key range (0-127)."""
+        make_wav(self.dir / 'soft.wav')
+        make_wav(self.dir / 'loud.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text(
+            '@program "Piano" instrument-multi\n'
+            '@layer ppp mp\n'
+            'soft.wav C4\n'
+            '@layer mf fff\n'
+            'loud.wav C4\n'
+        )
+        out = self.dir / 'out.for'
+        convert_from_list_file(listfile, out, mode=ConversionMode.INSTRUMENT)
+        parsed = parse_for_file(out.read_bytes())
+        pd = [o for o in parsed['objects'] if o['field0'] == 138][0]['data']
+        for i in range(2):
+            blk = LAYER_BLOCK_START + i * LAYER_BLOCK_SIZE
+            self.assertEqual(pd[blk + _BLK_LOKEY], 0)
+            self.assertEqual(pd[blk + _BLK_HIKEY], 127)
 
 
 class TestForWriterCLI(unittest.TestCase):

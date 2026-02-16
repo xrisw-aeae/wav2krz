@@ -21,6 +21,7 @@ LAYER_BLOCK_SIZE = 318  # 0x13E
 # Offsets within each 318-byte layer block
 _BLK_LOKEY = 0x00       # 1 byte: lo_key
 _BLK_HIKEY = 0x01       # 1 byte: hi_key
+_BLK_VEL_ZONE = 0x02    # 1 byte: velocity zone encoding = (lo+1)*8 - (hi+1)
 _BLK_CAL_KMID = 0x86    # 4 bytes BE32: keymap ID
 _BLK_CAL_KMID2 = 0x8A   # 4 bytes BE32: keymap ID (duplicate)
 _BLK_LAYER_IDX = 0x91   # 1 byte: layer index (0, 1, 2, ...)
@@ -37,8 +38,16 @@ L2_CAL_KMID_OFFSET = LAYER_BLOCK_START + LAYER_BLOCK_SIZE + _BLK_CAL_KMID  # 0x0
 L2_CAL_KMID2_OFFSET = LAYER_BLOCK_START + LAYER_BLOCK_SIZE + _BLK_CAL_KMID2  # 0x02AF
 
 
+def _encode_vel_zone(vel_zone: tuple) -> int:
+    """Encode a (lo, hi) 0-based velocity zone tuple to a single byte.
+
+    Formula: byte = (lo+1)*8 - (hi+1), where ppp=0...fff=7.
+    """
+    return (vel_zone[0] + 1) * 8 - (vel_zone[1] + 1)
+
+
 def build_program_data(layer_count: int, keymap_ids: list,
-                       key_ranges: list) -> bytes:
+                       key_ranges: list, vel_zones: list = None) -> bytes:
     """Build .for program data for any number of layers (1-32).
 
     For 1 layer, uses the 1-layer template directly.
@@ -49,6 +58,7 @@ def build_program_data(layer_count: int, keymap_ids: list,
         layer_count: Number of layers (1-32)
         keymap_ids: List of .for keymap IDs, one per layer
         key_ranges: List of (lo_key, hi_key) tuples, one per layer
+        vel_zones: Optional list of (lo_zone, hi_zone) 0-based tuples per layer
 
     Returns:
         Program data as bytes
@@ -57,13 +67,20 @@ def build_program_data(layer_count: int, keymap_ids: list,
         raise ValueError(f"Layer count must be 1-32, got {layer_count}")
 
     if layer_count == 1:
-        return patch_program_template(PROGRAM_1LAYER, 1, keymap_ids, key_ranges)
+        data = patch_program_template(PROGRAM_1LAYER, 1, keymap_ids, key_ranges)
+        if vel_zones and vel_zones[0] is not None:
+            data = bytearray(data)
+            data[LAYER_BLOCK_START + _BLK_VEL_ZONE] = _encode_vel_zone(vel_zones[0])
+            data = bytes(data)
+        return data
 
     # Extract components from the 2-layer template
-    prefix = bytearray(PROGRAM_2LAYER[:LAYER_BLOCK_START])       # 0x00 - 0xE6 (231 bytes)
-    l1_block = bytearray(PROGRAM_2LAYER[LAYER_BLOCK_START:LAYER_BLOCK_START + LAYER_BLOCK_SIZE])  # L1 reference block
-    l2_block = bytearray(PROGRAM_2LAYER[LAYER_BLOCK_START + LAYER_BLOCK_SIZE:LAYER_BLOCK_START + 2 * LAYER_BLOCK_SIZE])  # L2 default block
-    suffix = PROGRAM_2LAYER[LAYER_BLOCK_START + 2 * LAYER_BLOCK_SIZE:]  # after all layer blocks
+    bs = LAYER_BLOCK_START
+    bsz = LAYER_BLOCK_SIZE
+    prefix = bytearray(PROGRAM_2LAYER[:bs])                       # 0x00..0xE6
+    l1_block = bytearray(PROGRAM_2LAYER[bs:bs + bsz])             # L1 reference
+    l2_block = bytearray(PROGRAM_2LAYER[bs + bsz:bs + 2 * bsz])  # L2 default
+    suffix = PROGRAM_2LAYER[bs + 2 * bsz:]                        # after layers
 
     # Set layer count in prefix
     prefix[LAYER_COUNT_OFFSET] = layer_count
@@ -81,6 +98,8 @@ def build_program_data(layer_count: int, keymap_ids: list,
         lo, hi = key_ranges[i]
         data[blk_start + _BLK_LOKEY] = lo
         data[blk_start + _BLK_HIKEY] = hi
+        if vel_zones and i < len(vel_zones) and vel_zones[i] is not None:
+            data[blk_start + _BLK_VEL_ZONE] = _encode_vel_zone(vel_zones[i])
         struct.pack_into('>I', data, blk_start + _BLK_CAL_KMID, keymap_ids[i])
         struct.pack_into('>I', data, blk_start + _BLK_CAL_KMID2, keymap_ids[i])
         data[blk_start + _BLK_LAYER_IDX] = i

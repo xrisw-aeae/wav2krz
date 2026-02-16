@@ -5,10 +5,9 @@ from pathlib import Path
 from typing import BinaryIO, List, Union
 
 from .header import KrzHeader
-from .sample import KSample
 from .keymap import KKeymap
 from .program import KProgram
-from .hash import KHash
+from .sample import KSample
 
 
 class KrzWriter:

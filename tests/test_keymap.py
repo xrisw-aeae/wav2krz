@@ -4,10 +4,12 @@ import unittest
 
 from wav2krz.krz.hash import KHash
 from wav2krz.krz.keymap import (
-    KKeymap, VeloLevel, KeymapEntry, method_to_size,
-    create_instrument_keymap, create_drumset_keymap,
+    VeloLevel,
+    create_drumset_keymap,
+    create_instrument_keymap,
+    method_to_size,
 )
-from wav2krz.krz.sample import KSample, Soundfilehead, Envelope, create_sample_from_wav
+from wav2krz.krz.sample import KSample, create_sample_from_wav
 from wav2krz.wav.parser import WavFile
 
 

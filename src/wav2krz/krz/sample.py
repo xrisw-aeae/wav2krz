@@ -1,12 +1,16 @@
 """Kurzweil KSample, Soundfilehead, and Envelope structures."""
 
-import struct
-import math
-from dataclasses import dataclass, field
-from typing import BinaryIO, Optional
+from __future__ import annotations
 
-from ..exceptions import InvalidNameError
+import math
+import struct
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, BinaryIO, Optional
+
 from .hash import KHash
+
+if TYPE_CHECKING:
+    from ..wav.parser import WavFile
 
 
 @dataclass
@@ -60,7 +64,8 @@ class Soundfilehead:
         if self.sample_period > 0:
             ratio = 96000.0 / 1_000_000_000 * self.sample_period
             if ratio > 0:
-                self.max_pitch = int(math.ceil(1200.0 * math.log(ratio) / math.log(2.0)) + 100 * key - 1200)
+                cents = 1200.0 * math.log(ratio) / math.log(2.0)
+                self.max_pitch = int(math.ceil(cents) + 100 * key - 1200)
 
     def needs_load(self) -> bool:
         """Check if sample needs to be loaded (RAM-based)."""
@@ -281,7 +286,7 @@ def swap_bytes(data: bytes) -> bytes:
     return bytes(result)
 
 
-def create_sample_from_wav(wav_data: 'WavFile', name: str, sample_id: int,
+def create_sample_from_wav(wav_data: WavFile, name: str, sample_id: int,
                            root_key: int = 60) -> KSample:
     """
     Create a KSample from parsed WAV data.
@@ -295,7 +300,6 @@ def create_sample_from_wav(wav_data: 'WavFile', name: str, sample_id: int,
     Returns:
         KSample ready for writing
     """
-    from ..wav.parser import WavFile
 
     ks = KSample()
     ks.set_name(name.lower()[:16])
@@ -377,7 +381,7 @@ def _truncate_sampledata(sh: Soundfilehead) -> None:
             sh.sampledata = sh.sampledata[:max_bytes]
 
 
-def _create_soundfilehead(wav_data: 'WavFile', num_samples: int,
+def _create_soundfilehead(wav_data: WavFile, num_samples: int,
                           sample_period: int, root_key: int) -> Soundfilehead:
     """Create a Soundfilehead with proper settings."""
     sh = Soundfilehead()

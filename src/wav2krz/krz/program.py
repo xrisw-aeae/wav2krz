@@ -106,7 +106,8 @@ class KProgram:
         self.segments.append(s)
 
     def add_layer(self, keymap: KKeymap, stereo: bool = False,
-                  lo_key: int = 0, hi_key: int = 127) -> None:
+                  lo_key: int = 0, hi_key: int = 127,
+                  vel_zone: tuple = None) -> None:
         """
         Add a layer referencing a keymap.
 
@@ -115,6 +116,8 @@ class KProgram:
             stereo: Whether the samples are stereo
             lo_key: Lower key bound for this layer (0-127)
             hi_key: Upper key bound for this layer (0-127)
+            vel_zone: Optional (lo_zone, hi_zone) 0-based velocity zone (0-7).
+                      Encoded as (lo+1)*8 - (hi+1) into LYR data[5].
         """
         # Get keymap ID
         keymap_id = KHash.get_id(keymap.get_hash())
@@ -127,7 +130,7 @@ class KProgram:
             s.data[2] = 0
             s.data[3] = lo_key  # Lower bound
             s.data[4] = hi_key  # Upper bound
-            s.data[5] = 0
+            s.data[5] = 0 if vel_zone is None else (vel_zone[0] + 1) * 8 - (vel_zone[1] + 1)
             s.data[6] = 0x7F
             s.data[7] = 0
             s.data[8] = 0x24  # Enable: Normal Stereo = 0x20
@@ -190,7 +193,7 @@ class KProgram:
             s.data[2] = 0
             s.data[3] = lo_key  # Lower bound
             s.data[4] = hi_key  # Upper bound
-            s.data[5] = 0
+            s.data[5] = 0 if vel_zone is None else (vel_zone[0] + 1) * 8 - (vel_zone[1] + 1)
             s.data[6] = 0x7F
             s.data[7] = 0
             s.data[8] = 0x04  # Enable: Mono
@@ -314,7 +317,8 @@ def create_multi_layer_program(
     name: str,
     stereo_flags: List[bool],
     key_ranges: List[tuple],
-    mode: int = 2
+    mode: int = 2,
+    vel_zones: list = None
 ) -> KProgram:
     """
     Create a program with multiple layers, each referencing a different keymap.
@@ -326,6 +330,7 @@ def create_multi_layer_program(
         stereo_flags: Whether each layer's samples are stereo
         key_ranges: (lo_key, hi_key) tuples per layer
         mode: Program mode (2=K2000, 3=K2500, 4=K2600)
+        vel_zones: Optional list of (lo_zone, hi_zone) 0-based velocity zones per layer
 
     Returns:
         KProgram ready for writing
@@ -338,7 +343,8 @@ def create_multi_layer_program(
     for i, km in enumerate(keymaps):
         stereo = stereo_flags[i] if i < len(stereo_flags) else False
         lo, hi = key_ranges[i]
-        prog.add_layer(km, stereo, lo_key=lo, hi_key=hi)
+        vz = vel_zones[i] if vel_zones and i < len(vel_zones) else None
+        prog.add_layer(km, stereo, lo_key=lo, hi_key=hi, vel_zone=vz)
 
     return prog
 

@@ -4,7 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .converter import convert_from_list_file, convert_wavs_to_krz, ConversionMode
+from .converter import convert_from_list_file, convert_wavs_to_krz
 from .exceptions import Wav2KrzError
 
 
@@ -62,7 +62,7 @@ Examples:
     # Mode selection
     parser.add_argument(
         '--mode', '-m',
-        choices=['samples', 'instrument', 'drumset', 'drumset-multi'],
+        choices=['samples', 'instrument', 'instrument-multi', 'drumset', 'drumset-multi'],
         default='instrument',
         help='Conversion mode (default: instrument)'
     )
@@ -98,11 +98,11 @@ Examples:
         help='Base name for keymap/program (default: output filename)'
     )
 
-    # Verbose output
+    # Quiet mode (suppress verbose output)
     parser.add_argument(
-        '--verbose', '-v',
+        '--quiet', '-q',
         action='store_true',
-        help='Enable verbose output'
+        help='Suppress verbose output'
     )
 
     return parser
@@ -127,26 +127,23 @@ def main(args: list[str] | None = None) -> int:
         parser.error("Output file required (positional argument or --output)")
 
     # Ensure .krz extension
-    if not output_path.suffix.lower() in ('.krz', '.k25', '.k26', '.for'):
+    if output_path.suffix.lower() not in ('.krz', '.k25', '.k26', '.for'):
         output_path = output_path.with_suffix('.krz')
+
+    verbose = not parsed.quiet
 
     try:
         if parsed.wav_files:
             # Direct WAV files
-            wav_files = parsed.wav_files
-            if parsed.verbose:
-                print(f"Converting {len(wav_files)} WAV file(s)...")
-                for wf in wav_files:
-                    print(f"  - {wf}")
-
             convert_wavs_to_krz(
-                wav_files=wav_files,
+                wav_files=parsed.wav_files,
                 output_path=output_path,
                 mode=parsed.mode,
                 start_key=parsed.start_key,
                 start_id=parsed.start_id,
                 name=parsed.name,
-                root_key=parsed.root_key
+                root_key=parsed.root_key,
+                verbose=verbose
             )
         else:
             # List file
@@ -155,9 +152,6 @@ def main(args: list[str] | None = None) -> int:
                       file=sys.stderr)
                 return 1
 
-            if parsed.verbose:
-                print(f"Reading WAV list from: {parsed.input_list}")
-
             convert_from_list_file(
                 list_file=parsed.input_list,
                 output_path=output_path,
@@ -165,13 +159,9 @@ def main(args: list[str] | None = None) -> int:
                 start_key=parsed.start_key,
                 start_id=parsed.start_id,
                 name=parsed.name,
-                root_key=parsed.root_key
+                root_key=parsed.root_key,
+                verbose=verbose
             )
-
-        if parsed.verbose:
-            print(f"Created: {output_path}")
-        else:
-            print(f"Created {output_path}")
 
         return 0
 

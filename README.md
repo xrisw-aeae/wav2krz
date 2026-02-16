@@ -1,8 +1,10 @@
 # wav2krz
 
-Convert WAV files to Kurzweil soundfile format (.krz, .k25, .k26) with automatic keymap and program creation.
+Collect WAV files into Kurzweil soundfile format (.krz, .k25, .k26, and .for) with automatic keymap and program creation.
 
-Generates ready-to-load files for the Kurzweil K2000, K2500, and K2600 series synthesizers.
+Generates ready-to-load files for the Kurzweil K2000, K2500, K2600, and Forte series synthesizers. This library would not exist without the excellent (Kurzfiler library)[https://sourceforge.net/projects/kurzfiler/].
+
+I own a Kurzweil Forte 7, which I love, but I find it tedious and error prone to import samples and create and edit keymaps on the unit itself. I wanted a straightforward way to organize samples into keymaps and layers via a simple text file format for instruments and drumsets so can spend less time arranging samples and move on to sound design possibilities with those samples, keymaps, layers, and programs more quickly.
 
 ## Installation
 
@@ -38,10 +40,12 @@ The output format is determined by the file extension:
 | `.krz`    | K2000 / K2000R       |
 | `.k25`    | K2500 / K2500R       |
 | `.k26`    | K2600 / K2661        |
+| `.for`    | Forte                |
 
 ```sh
 wav2krz --wav pad.wav -o pad.krz    # K2000 format
 wav2krz --wav pad.wav -o pad.k26    # K2600 format
+wav2krz --wav pad.wav -o pad.for    # Forte format
 ```
 
 ## Conversion Modes
@@ -92,7 +96,7 @@ wav2krz [options] --wav file1.wav [file2.wav ...] --output output.krz
 | `--root-key`, `-r` | Root key override for all samples (MIDI 0-127) |
 | `--start-id`, `-i` | Starting Kurzweil object ID (default: 200) |
 | `--name`, `-n` | Base name for the keymap and program (default: output filename, max 16 chars) |
-| `--verbose`, `-v` | Print details during conversion |
+| `--quiet`, `-q` | Suppress verbose output (verbose is on by default) |
 
 ## List File Format
 
@@ -218,3 +222,13 @@ snare_hard.wav   mp-fff
 pip install -e .
 pytest tests/ -v
 ```
+
+## Linting
+
+```
+ruff check src/ tests/
+```
+
+## License
+
+MIT

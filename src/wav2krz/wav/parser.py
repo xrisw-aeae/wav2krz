@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from ..exceptions import WavParseError, UnsupportedWavFormat
+from ..exceptions import UnsupportedWavFormat, WavParseError
 
 
 @dataclass

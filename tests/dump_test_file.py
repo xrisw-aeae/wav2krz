@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from wav2krz.converter import convert_wavs_to_krz, ConversionMode
+from wav2krz.converter import ConversionMode, convert_wavs_to_krz
+
 from .helpers import make_wav
 
 
@@ -42,7 +43,10 @@ def dump_file(filepath):
             name_size = struct.unpack('>H', f.read(2))[0]
             name = f.read(name_size).decode('latin-1', errors='replace')
 
-            result.append(f'Object {obj_num}: {type_name} id={obj_id} hash={hash_val} name="{name}" pos={pos} block_size={block_size}')
+            result.append(
+                f'Object {obj_num}: {type_name} id={obj_id} hash={hash_val}'
+                f' name="{name}" pos={pos} block_size={block_size}'
+            )
 
             # Seek to next block
             f.seek(pos - block_size)

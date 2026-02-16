@@ -296,7 +296,8 @@ class KKeymap:
         level_offsets = [0] * 8
         for j in range(8):
             level_offsets[j] = (8 - j) * 2
-            level_offsets[j] += self.velocity_mapping[j] * self.velocity_levels[self.velocity_mapping[j]].get_size()
+            mapped = self.velocity_mapping[j]
+            level_offsets[j] += mapped * self.velocity_levels[mapped].get_size()
 
         for offset in level_offsets:
             f.write(struct.pack('>h', offset))
