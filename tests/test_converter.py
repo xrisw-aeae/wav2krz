@@ -189,14 +189,63 @@ class TestReadWavList(unittest.TestCase):
             read_wav_list(listfile)
         self.assertIn('lokey', str(ctx.exception).lower())
 
-    def test_key_range_missing_hikey_error(self):
-        """Error when lokey provided but hikey missing."""
+    def test_two_keys_second_higher_infers_hikey(self):
+        """root + higher value: lo=root, hi=second."""
         make_wav(self.dir / 'a.wav')
         listfile = self.dir / 'list.txt'
-        listfile.write_text('a.wav C4 C3\n')  # root + lokey but no hikey
-        with self.assertRaises(Wav2KrzError) as ctx:
+        listfile.write_text('a.wav C4 G4\n')
+        entries = read_wav_list(listfile)
+        self.assertEqual(entries[0].root_key, 60)  # C4
+        self.assertEqual(entries[0].lo_key, 60)    # C4
+        self.assertEqual(entries[0].hi_key, 67)    # G4
+
+    def test_two_keys_second_lower_infers_lokey(self):
+        """root + lower value: lo=second, hi=root."""
+        make_wav(self.dir / 'a.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text('a.wav C4 C3\n')
+        entries = read_wav_list(listfile)
+        self.assertEqual(entries[0].root_key, 60)  # C4
+        self.assertEqual(entries[0].lo_key, 48)    # C3
+        self.assertEqual(entries[0].hi_key, 60)    # C4
+
+    def test_two_keys_equal_infers_single_key(self):
+        """root + equal value: lo=hi=root."""
+        make_wav(self.dir / 'a.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text('a.wav C4 C4\n')
+        entries = read_wav_list(listfile)
+        self.assertEqual(entries[0].root_key, 60)
+        self.assertEqual(entries[0].lo_key, 60)
+        self.assertEqual(entries[0].hi_key, 60)
+
+    def test_quoted_filename_with_spaces(self):
+        """Quoted filename with spaces is parsed correctly."""
+        make_wav(self.dir / 'my sample.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text('"my sample.wav" C4\n')
+        entries = read_wav_list(listfile)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].path.name, 'my sample.wav')
+        self.assertEqual(entries[0].root_key, 60)
+
+    def test_quoted_filename_with_spaces_and_velocity(self):
+        """Quoted filename with spaces plus velocity range."""
+        make_wav(self.dir / 'kick drum.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text('"kick drum.wav" C2 ppp-mp\n')
+        entries = read_wav_list(listfile)
+        self.assertEqual(entries[0].path.name, 'kick drum.wav')
+        self.assertEqual(entries[0].root_key, 36)
+        self.assertEqual(entries[0].vel_range, (0, 3))
+
+    def test_unclosed_quote_error(self):
+        """Unclosed quote in listfile raises Wav2KrzError."""
+        make_wav(self.dir / 'a.wav')
+        listfile = self.dir / 'list.txt'
+        listfile.write_text('"unclosed.wav\n')
+        with self.assertRaises(Wav2KrzError):
             read_wav_list(listfile)
-        self.assertIn('hikey', str(ctx.exception).lower())
 
 
 class TestConvertWavsToKrz(unittest.TestCase):

@@ -168,11 +168,16 @@ filename.wav                    # Defaults for everything
 filename.wav C4                 # Root key (note name or MIDI number)
 filename.wav C4 v1-3            # Root key + velocity range
 filename.wav 60 ppp-p           # MIDI number + named velocity range
+filename.wav C4 C5              # Root key + one bound: lo=C4, hi=C5 (inferred)
+filename.wav C4 C3              # Root key + one bound: lo=C3, hi=C4 (inferred)
 filename.wav C4 C3 C5           # Root key, lokey, hikey (explicit key range)
 filename.wav C4 C3 C5 v1-3      # Root key, lokey, hikey, velocity
+"my sample.wav" C4              # Quoted filename (supports spaces)
 ```
 
 Column order: `filename [root_key] [lokey hikey] [velocity]`
+
+Two-key shorthand: `filename root_key bound` — if `bound` > `root_key`, infers `lo=root_key, hi=bound`; if `bound` < `root_key`, infers `lo=bound, hi=root_key`. Filenames with spaces must be quoted.
 
 **Program sections** define multiple programs in one file:
 ```

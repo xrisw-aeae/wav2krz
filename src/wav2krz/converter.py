@@ -503,22 +503,24 @@ def _parse_sample_line(parts: List[str], line_num: int, list_file: Path,
             entry.lo_key = lo
             entry.hi_key = hi
         elif len(remaining) == 2:
-            n1 = parse_note_name(remaining[0])
+            rk = parse_note_name(remaining[0])
             n2 = parse_note_name(remaining[1])
-            if n1 is not None and n2 is not None:
-                raise Wav2KrzError(
-                    f"Missing hikey on line {line_num}. "
-                    f"lokey/hikey must appear together (got root_key and lokey only)."
-                )
-            elif n1 is not None:
-                raise Wav2KrzError(
-                    f"Unknown parameter '{remaining[1]}' on line {line_num}. "
-                    f"Expected velocity range (v1-3, ppp-p) or lokey+hikey pair."
-                )
-            else:
+            if rk is None:
                 raise Wav2KrzError(
                     f"Invalid root key '{remaining[0]}' on line {line_num}."
                 )
+            if n2 is None:
+                raise Wav2KrzError(
+                    f"Unknown parameter '{remaining[1]}' on line {line_num}. "
+                    f"Expected note name (C4) or MIDI number (60)."
+                )
+            entry.root_key = rk
+            if n2 >= rk:
+                entry.lo_key = rk
+                entry.hi_key = n2
+            else:
+                entry.lo_key = n2
+                entry.hi_key = rk
         else:
             raise Wav2KrzError(
                 f"Too many parameters on line {line_num}. "
@@ -569,7 +571,10 @@ def read_wav_list(list_file: Path) -> List[WavEntry]:
             if not line or line.startswith('#'):
                 continue
 
-            parts = line.split()
+            try:
+                parts = shlex.split(line)
+            except ValueError as e:
+                raise Wav2KrzError(f"Parse error on line {line_num}: {e}")
             if not parts:
                 continue
 
@@ -642,7 +647,10 @@ def read_program_list(list_file: Path, cli_mode: str = None) -> List[ProgramSect
             if not line or line.startswith('#'):
                 continue
 
-            parts = line.split()
+            try:
+                parts = shlex.split(line)
+            except ValueError as e:
+                raise Wav2KrzError(f"Parse error on line {line_num}: {e}")
             if not parts:
                 continue
 

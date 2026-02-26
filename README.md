@@ -134,6 +134,22 @@ bass.wav      C2  C0  B2
 piano.wav     C4  C3  B5
 ```
 
+You can also provide just one boundary alongside the root key. If the second key is higher than the root, it becomes the high key (lo=root). If lower, it becomes the low key (hi=root).
+
+```
+piano.wav     C4  C6    # lo=C4, hi=C6
+bass.wav      C2  C0    # lo=C0, hi=C2
+```
+
+### Filenames with Spaces
+
+Quote filenames that contain spaces:
+
+```
+"piano soft.wav"   C4  pp-mp
+"kick drum.wav"    C2
+```
+
 ### Velocity Layers
 
 Append a velocity range to assign samples to velocity zones. Zones are numbered 1-8 or named `ppp`, `pp`, `p`, `mp`, `mf`, `f`, `ff`, `fff`.
