@@ -4,9 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wav2krz"
-version = "0.7.0"
-description = "Convert WAV files to Kurzweil .krz/.k25/.k26/.for format"
+version = "0.7.1"
+description = "Collect WAV files into Kurzweil .krz/.k25/.k26/.for format"
 requires-python = ">=3.10"
+authors = [
+  { name="xrisw.aeae", email="xrisw.aeae@gmail.com" },
+]
+readme = "README.md"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+
+[project.urls]
+Homepage = "https://github.com/xrisw-aeae/wav2krz"
 
 [project.scripts]
 wav2krz = "wav2krz.cli:main"
