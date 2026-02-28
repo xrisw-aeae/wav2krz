@@ -817,7 +817,8 @@ def convert_wavs_to_krz(
 
         if verbose:
             stereo_str = "stereo" if sample.is_stereo() else "mono"
-            print(f"  Sample: {sample_name} ({_midi_to_note(sample_root_key)}, {stereo_str})")
+            depth_str = " 24→16-bit" if wav_data.bits_per_sample == 24 else ""
+            print(f"  Sample: {sample_name} ({_midi_to_note(sample_root_key)}, {stereo_str}{depth_str})")
 
         # Track velocity range for this sample
         vr = None
@@ -1039,7 +1040,8 @@ def _process_section(
 
         if verbose:
             stereo_str = "stereo" if sample.is_stereo() else "mono"
-            print(f"  Sample: {sample_name} ({_midi_to_note(sample_root_key)}, {stereo_str})")
+            depth_str = " 24→16-bit" if wav_data.bits_per_sample == 24 else ""
+            print(f"  Sample: {sample_name} ({_midi_to_note(sample_root_key)}, {stereo_str}{depth_str})")
 
         vr = vel_ranges[i]
         sample_vel_ranges.append(vr)

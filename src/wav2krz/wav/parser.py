@@ -111,7 +111,9 @@ def parse_wav(filepath: Path | str) -> WavFile:
     Supports:
     - 16-bit mono PCM
     - 16-bit stereo PCM
-    - 8-bit mono PCM
+    - 24-bit mono PCM (downconverted to 16-bit)
+    - 24-bit stereo PCM (downconverted to 16-bit)
+    - 8-bit mono PCM (upconverted to 16-bit)
 
     Args:
         filepath: Path to the WAV file
@@ -173,8 +175,8 @@ def parse_wav(filepath: Path | str) -> WavFile:
     # Validate supported formats
     if channels not in (1, 2):
         raise UnsupportedWavFormat(f"Only mono and stereo supported, got {channels} channels")
-    if bits_per_sample not in (8, 16):
-        raise UnsupportedWavFormat(f"Only 8-bit and 16-bit supported, got {bits_per_sample}-bit")
+    if bits_per_sample not in (8, 16, 24):
+        raise UnsupportedWavFormat(f"Only 8-bit, 16-bit, and 24-bit supported, got {bits_per_sample}-bit")
     if channels == 2 and bits_per_sample == 8:
         raise UnsupportedWavFormat("8-bit stereo not supported")
 

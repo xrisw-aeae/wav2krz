@@ -320,6 +320,39 @@ def create_sample_from_wav(wav_data: WavFile, name: str, sample_id: int,
         ks.insert_header(sh)
         ks.flags = 0  # mono
 
+    elif wav_data.channels == 1 and wav_data.bits_per_sample == 24:
+        # 24-bit mono - downconvert to 16-bit by dropping LSB, swap LE→BE
+        num_samples = len(wav_data.data) // 3
+        sh = _create_soundfilehead(wav_data, num_samples, sample_period, root_key)
+        converted = bytearray(num_samples * 2)
+        for i in range(num_samples):
+            converted[i * 2] = wav_data.data[i * 3 + 2]      # MSB → BE high byte
+            converted[i * 2 + 1] = wav_data.data[i * 3 + 1]  # MID → BE low byte
+        sh.sampledata = bytes(converted)
+        _truncate_sampledata(sh)
+        ks.insert_header(sh)
+        ks.flags = 0  # mono
+
+    elif wav_data.channels == 2 and wav_data.bits_per_sample == 24:
+        # 24-bit stereo - downconvert to 16-bit, split into L/R headers
+        num_frames = len(wav_data.data) // 6  # 6 bytes per stereo frame
+        sh_left = _create_soundfilehead(wav_data, num_frames, sample_period, root_key)
+        sh_right = _create_soundfilehead(wav_data, num_frames, sample_period, root_key)
+        left_data = bytearray(num_frames * 2)
+        right_data = bytearray(num_frames * 2)
+        for i in range(num_frames):
+            left_data[i * 2] = wav_data.data[i * 6 + 2]      # L MSB → BE high
+            left_data[i * 2 + 1] = wav_data.data[i * 6 + 1]  # L MID → BE low
+            right_data[i * 2] = wav_data.data[i * 6 + 5]     # R MSB → BE high
+            right_data[i * 2 + 1] = wav_data.data[i * 6 + 4] # R MID → BE low
+        sh_left.sampledata = bytes(left_data)
+        sh_right.sampledata = bytes(right_data)
+        _truncate_sampledata(sh_left)
+        _truncate_sampledata(sh_right)
+        ks.insert_header(sh_left)
+        ks.insert_header(sh_right)
+        ks.flags = 1  # stereo
+
     elif wav_data.channels == 1 and wav_data.bits_per_sample == 8:
         # 8-bit mono - convert to 16-bit
         num_samples = len(wav_data.data)

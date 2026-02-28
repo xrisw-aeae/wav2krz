@@ -1,0 +1,19 @@
+# drumset.txt — Basic drum kit
+#
+# Usage:
+#   wav2krz examples/drumset.txt output.krz --mode drumset
+#   wav2krz examples/drumset.txt output.for --mode drumset
+#
+# Each sample is placed on a single key determined by its root key.
+# Without a root key, samples are assigned consecutive keys starting at C1.
+# Key ranges (lo/hi) are optional — without them each sample occupies exactly one key.
+
+kick.wav        C1
+snare.wav       D1
+hihat_closed.wav  F#1
+hihat_open.wav  G#1
+crash.wav       A1
+ride.wav        D2
+tom_hi.wav      A2
+tom_mid.wav     B2
+tom_lo.wav      C3

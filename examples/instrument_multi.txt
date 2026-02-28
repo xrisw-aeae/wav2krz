@@ -1,0 +1,25 @@
+# instrument_multi.txt — Velocity-layered instrument
+#
+# Usage:
+#   wav2krz examples/instrument_multi.txt output.krz --mode instrument-multi
+#   wav2krz examples/instrument_multi.txt output.for --mode instrument-multi
+#
+# Each @layer defines a velocity zone. Samples within a layer are mapped
+# across the full keyboard (pitched). Each layer gets its own keymap.
+# Velocity zones: ppp pp p mp mf f ff fff
+
+@program "Grand Piano" instrument-multi
+
+@layer ppp mp
+piano_soft_c2.wav  C2
+piano_soft_c3.wav  C3
+piano_soft_c4.wav  C4
+piano_soft_c5.wav  C5
+piano_soft_c6.wav  C6
+
+@layer mf fff
+piano_hard_c2.wav  C2
+piano_hard_c3.wav  C3
+piano_hard_c4.wav  C4
+piano_hard_c5.wav  C5
+piano_hard_c6.wav  C6

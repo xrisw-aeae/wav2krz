@@ -6,8 +6,8 @@
 
 **Primary Purpose:**
 - Convert one or more WAV files into a single `.krz` file
-- Support four conversion modes: raw samples, pitched instrument, drumset, and multi-layer drumset
-- Handle mono/stereo, 8-bit/16-bit PCM WAV input
+- Support five conversion modes: raw samples, pitched instrument, multi-layer instrument, drumset, and multi-layer drumset
+- Handle mono/stereo, 8-bit/16-bit/24-bit PCM WAV input (24-bit downconverted to 16-bit automatically)
 - Read WAV `smpl` chunk metadata (root key, loop points)
 - Support velocity layering via list file syntax
 
@@ -97,6 +97,7 @@ List file → read_wav_list() → WavEntry[] → convert_wavs_to_krz() → KrzWr
 |------|-------------|-----------------|
 | `samples` | Raw sample data only | KSample(s) |
 | `instrument` | Pitched across keyboard, gaps filled | KSample(s) + KKeymap + KProgram |
+| `instrument-multi` | Multiple velocity layers, each with own keymap | KSample(s) + KKeymap(s) + KProgram |
 | `drumset` | One sample per key, consecutive or assigned | KSample(s) + KKeymap + KProgram |
 | `drumset-multi` | Each group gets own keymap + layer with key range | KSample(s) + KKeymap(s) + KProgram |
 
@@ -124,7 +125,7 @@ List file → read_wav_list() → WavEntry[] → convert_wavs_to_krz() → KrzWr
 
 | File | Purpose |
 |------|---------|
-| `cli.py` | argparse CLI: modes, start-key, root-key, start-id, name, verbose |
+| `cli.py` | argparse CLI: `--wav`, `--mode`, `--quiet`; all per-sample config lives in the list file |
 | `converter.py` | `convert_wavs_to_krz()`, `convert_from_list_file()`, `read_wav_list()`, `read_program_list()` |
 | `exceptions.py` | `Wav2KrzError` hierarchy: `WavParseError`, `UnsupportedWavFormat`, `KrzWriteError`, `InvalidNameError` |
 
@@ -229,33 +230,26 @@ Additional rules:
 ## CLI Usage
 
 ```bash
-# Samples only
-wav2krz wavlist.txt output.krz --mode samples
+# From a list file (recommended — all config lives in the file)
+wav2krz wavlist.txt output.krz
+wav2krz wavlist.txt output.krz --mode drumset
+wav2krz wavlist.txt output.for --quiet
 
-# Instrument (pitched)
-wav2krz wavlist.txt output.krz --mode instrument
+# Direct WAV files (uses defaults: instrument mode, root key C4)
+wav2krz --wav kick.wav snare.wav drums.krz --mode drumset
 
-# Drumset starting at C1
-wav2krz wavlist.txt output.krz --mode drumset --start-key 36
+# Output format determined by extension
+wav2krz wavlist.txt output.k25   # K2500
+wav2krz wavlist.txt output.k26   # K2600
+wav2krz wavlist.txt output.for   # Forte
 
-# Direct WAV files
-wav2krz --wav kick.wav snare.wav --output drums.krz --mode drumset
-
-# K2500 / K2600 output
-wav2krz --wav pad.wav -o pad.k25
-wav2krz --wav pad.wav -o pad.k26
-
-# Options
-#   --start-id 200     Starting object ID (default 200)
-#   --root-key 60      Global root key override
-#   --name "My Inst"   Base name for keymap/program
-#   --verbose           Verbose output
+# Options: --mode / -m, --quiet / -q, --wav / -w
 ```
 
 ## Testing
 
 ```bash
-# Run all tests (210 tests)
+# Run all tests (253 tests as of last run)
 pytest tests/ -v
 
 # Run specific test file
@@ -283,6 +277,8 @@ Test helper `make_wav()` generates PCM WAV files with configurable frequency, du
 |--------|-----------|
 | 16-bit mono PCM | Yes |
 | 16-bit stereo PCM | Yes (split to L/R headers) |
+| 24-bit mono PCM | Yes (downconverted to 16-bit, drops LSB) |
+| 24-bit stereo PCM | Yes (downconverted to 16-bit, split to L/R) |
 | 8-bit mono PCM | Yes (upconverted to 16-bit) |
 | 8-bit stereo PCM | No |
 | Non-PCM (compressed) | No |

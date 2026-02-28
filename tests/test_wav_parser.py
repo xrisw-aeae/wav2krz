@@ -91,6 +91,50 @@ class TestParseWav8BitMono(unittest.TestCase):
         self.assertEqual(len(wav.data), wav.num_samples)
 
 
+class TestParseWav24BitMono(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = TemporaryDirectory()
+        self.dir = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_basic_properties(self):
+        wav = parse_wav(make_wav(self.dir / 'test.wav', bits=24))
+        self.assertEqual(wav.bits_per_sample, 24)
+        self.assertEqual(wav.channels, 1)
+        self.assertTrue(wav.is_mono)
+
+    def test_data_length(self):
+        wav = parse_wav(make_wav(self.dir / 'test.wav', bits=24, duration=0.1))
+        # 24-bit mono: 3 bytes per sample
+        self.assertEqual(len(wav.data), wav.num_samples * 3)
+
+    def test_sample_count(self):
+        wav = parse_wav(make_wav(self.dir / 'test.wav', bits=24, duration=0.5))
+        self.assertEqual(wav.num_samples, 22050)
+
+
+class TestParseWav24BitStereo(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = TemporaryDirectory()
+        self.dir = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_basic_properties(self):
+        wav = parse_wav(make_wav(self.dir / 'test.wav', bits=24, channels=2))
+        self.assertEqual(wav.bits_per_sample, 24)
+        self.assertEqual(wav.channels, 2)
+        self.assertTrue(wav.is_stereo)
+
+    def test_data_length(self):
+        wav = parse_wav(make_wav(self.dir / 'test.wav', bits=24, channels=2, duration=0.1))
+        # 24-bit stereo: 6 bytes per frame
+        self.assertEqual(len(wav.data), wav.num_samples * 6)
+
+
 class TestParseWavSmplChunk(unittest.TestCase):
     def setUp(self):
         self.tmpdir = TemporaryDirectory()

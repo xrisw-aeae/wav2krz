@@ -1,0 +1,15 @@
+# instrument.txt — Multi-sample pitched instrument
+#
+# Usage:
+#   wav2krz examples/instrument.txt output.krz
+#   wav2krz examples/instrument.txt output.for
+#
+# Each sample is recorded at its root key. The keymap fill algorithm
+# automatically splits the keyboard between neighboring samples.
+# Samples must be 16-bit or 24-bit mono or stereo PCM WAV.
+
+piano_c2.wav  C2
+piano_c3.wav  C3
+piano_c4.wav  C4
+piano_c5.wav  C5
+piano_c6.wav  C6

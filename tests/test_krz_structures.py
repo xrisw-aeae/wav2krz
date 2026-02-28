@@ -184,6 +184,41 @@ class TestCreateSampleFromWav(unittest.TestCase):
         # Each 8-bit sample becomes 2 bytes
         self.assertEqual(len(ks.headers[0].sampledata), 200)
 
+    def test_24bit_mono(self):
+        # 24-bit LE: [LSB, MID, MSB] per sample. Two samples: 0x000100 and 0x000200
+        raw = bytes([0x00, 0x01, 0x00,   # sample 0: LE 24-bit = 0x000100
+                     0x00, 0x02, 0x00])  # sample 1: LE 24-bit = 0x000200
+        wav = WavFile(channels=1, sample_rate=44100, bits_per_sample=24, data=raw)
+        ks = create_sample_from_wav(wav, 'test', 200, root_key=60)
+        self.assertEqual(len(ks.headers), 1)
+        self.assertFalse(ks.is_stereo())
+        # 24-bit → 16-bit: drop LSB, swap MID+MSB to BE → [MSB, MID]
+        # sample 0: MSB=0x00, MID=0x01 → BE bytes 0x00 0x01
+        # sample 1: MSB=0x00, MID=0x02 → BE bytes 0x00 0x02
+        self.assertEqual(len(ks.headers[0].sampledata), 4)
+        self.assertEqual(ks.headers[0].sampledata, bytes([0x00, 0x01, 0x00, 0x02]))
+
+    def test_24bit_stereo(self):
+        # Interleaved L/R 24-bit: 6 bytes per frame. One frame.
+        # L: [0x00, 0x01, 0x00] R: [0x00, 0x02, 0x00]
+        raw = bytes([0x00, 0x01, 0x00,   # L sample 0
+                     0x00, 0x02, 0x00])  # R sample 0
+        wav = WavFile(channels=2, sample_rate=44100, bits_per_sample=24, data=raw)
+        ks = create_sample_from_wav(wav, 'test', 200, root_key=60)
+        self.assertEqual(len(ks.headers), 2)
+        self.assertTrue(ks.is_stereo())
+        # Left: MSB=0x00, MID=0x01 → [0x00, 0x01]
+        self.assertEqual(ks.headers[0].sampledata, bytes([0x00, 0x01]))
+        # Right: MSB=0x00, MID=0x02 → [0x00, 0x02]
+        self.assertEqual(ks.headers[1].sampledata, bytes([0x00, 0x02]))
+
+    def test_24bit_mono_sample_count(self):
+        # 100 samples × 3 bytes each
+        wav = WavFile(channels=1, sample_rate=44100, bits_per_sample=24,
+                      data=b'\x00\x01\x02' * 100)
+        ks = create_sample_from_wav(wav, 'test', 200, root_key=60)
+        self.assertEqual(len(ks.headers[0].sampledata), 200)  # 100 samples × 2 bytes
+
     def test_loop_off_when_no_loop(self):
         wav = WavFile(channels=1, sample_rate=44100, bits_per_sample=16,
                       data=b'\x00\x01' * 100)

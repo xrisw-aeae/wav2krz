@@ -39,6 +39,9 @@ def make_wav(path: Path, frequency: float = 440.0, duration: float = 0.1,
         for _ in range(channels):
             if bits == 16:
                 audio.extend(struct.pack('<h', int(value * 32767)))
+            elif bits == 24:
+                sample = int(value * 8388607)  # 2^23 - 1
+                audio.extend(struct.pack('<i', sample)[:3])  # 3 LSBs of LE int32
             else:
                 audio.append(int((value + 1.0) * 127.5))
 

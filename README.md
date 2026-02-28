@@ -22,10 +22,10 @@ This installs the `wav2krz` command.
 
 ```sh
 # Single WAV to a playable instrument (pitched across the full keyboard)
-wav2krz --wav piano_c4.wav -o piano.krz
+wav2krz --wav piano_c4.wav piano.krz
 
 # Multiple WAVs as a drumset (each sample on a consecutive key from C1)
-wav2krz --wav kick.wav snare.wav hihat.wav -o drums.krz -m drumset
+wav2krz --wav kick.wav snare.wav hihat.wav drums.krz --mode drumset
 
 # From a list file
 wav2krz samples.txt output.krz
@@ -43,9 +43,9 @@ The output format is determined by the file extension:
 | `.for`    | Forte                |
 
 ```sh
-wav2krz --wav pad.wav -o pad.krz    # K2000 format
-wav2krz --wav pad.wav -o pad.k26    # K2600 format
-wav2krz --wav pad.wav -o pad.for    # Forte format
+wav2krz --wav pad.wav pad.krz    # K2000 format
+wav2krz --wav pad.wav pad.k26    # K2600 format
+wav2krz --wav pad.wav pad.for    # Forte format
 ```
 
 ## Conversion Modes
@@ -55,8 +55,8 @@ wav2krz --wav pad.wav -o pad.for    # Forte format
 Creates a sample, keymap, and program. One or more WAVs are mapped across the keyboard. With a single WAV, it covers all 128 keys pitched from the root key. With multiple WAVs, each sample covers a range of keys determined automatically.
 
 ```sh
-wav2krz --wav strings.wav -o strings.krz
-wav2krz --wav bass_low.wav bass_mid.wav bass_hi.wav -o bass.krz -m instrument
+wav2krz --wav strings.wav strings.krz
+wav2krz --wav bass_low.wav bass_mid.wav bass_hi.wav bass.krz --mode instrument
 ```
 
 ### `samples`
@@ -64,16 +64,15 @@ wav2krz --wav bass_low.wav bass_mid.wav bass_hi.wav -o bass.krz -m instrument
 Packs WAV files as raw samples with no keymap or program. Useful for loading sample data that you'll map manually on the Kurzweil.
 
 ```sh
-wav2krz --wav one.wav two.wav three.wav -o raw.krz -m samples
+wav2krz --wav one.wav two.wav three.wav raw.krz --mode samples
 ```
 
 ### `drumset`
 
-Each WAV is placed on a separate key, starting from a configurable start key (default: C1 / MIDI 36). A single keymap and program are created.
+Each WAV is placed on a separate key, starting at C1 (MIDI 36) by default. A single keymap and program are created. To start on a different key, use a list file with `@group` directives that specify per-sample root keys.
 
 ```sh
-wav2krz --wav kick.wav snare.wav hat.wav -o kit.krz -m drumset
-wav2krz --wav kick.wav snare.wav hat.wav -o kit.krz -m drumset --start-key 48
+wav2krz --wav kick.wav snare.wav hat.wav kit.krz --mode drumset
 ```
 
 ### `drumset-multi`
@@ -83,20 +82,17 @@ Creates a multi-layer program where each group of samples gets its own keymap an
 ## CLI Reference
 
 ```
-wav2krz [options] <input_list> <output>
-wav2krz [options] --wav file1.wav [file2.wav ...] --output output.krz
+wav2krz <input_list> <output> [--mode MODE] [--quiet]
+wav2krz --wav file1.wav [file2.wav ...] <output> [--mode MODE] [--quiet]
 ```
 
 | Option | Description |
 |---|---|
 | `--wav`, `-w` | WAV files to convert (alternative to list file) |
-| `--output`, `-o` | Output file path |
-| `--mode`, `-m` | `samples`, `instrument`, `drumset`, or `drumset-multi` (default: `instrument`) |
-| `--start-key`, `-k` | Starting MIDI key for drumset mode (default: 36 / C1) |
-| `--root-key`, `-r` | Root key override for all samples (MIDI 0-127) |
-| `--start-id`, `-i` | Starting Kurzweil object ID (default: 200) |
-| `--name`, `-n` | Base name for the keymap and program (default: output filename, max 16 chars) |
+| `--mode`, `-m` | `samples`, `instrument`, `instrument-multi`, `drumset`, or `drumset-multi` (default: `instrument`) |
 | `--quiet`, `-q` | Suppress verbose output (verbose is on by default) |
+
+All per-sample configuration (root keys, key ranges, velocity layers, program names) is specified in the list file.
 
 ## List File Format
 
@@ -228,6 +224,7 @@ snare_hard.wav   mp-fff
 ## Supported WAV Formats
 
 - 16-bit PCM mono or stereo
+- 24-bit PCM mono or stereo (downconverted to 16-bit automatically)
 - 8-bit PCM mono
 - Any sample rate (44100, 48000, 22050, etc.)
 - Loop points and root key from the WAV `smpl` chunk (if present)

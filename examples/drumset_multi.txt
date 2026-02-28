@@ -1,0 +1,38 @@
+# drumset_multi.txt — Velocity-switched drum kit
+#
+# Usage:
+#   wav2krz examples/drumset_multi.txt output.krz --mode drumset-multi
+#   wav2krz examples/drumset_multi.txt output.for --mode drumset-multi
+#
+# Each @group defines a key (root + optional lo/hi range).
+# Samples within a group are velocity-switched on that key.
+# Each group gets its own keymap and layer in the program.
+# Velocity zones: ppp pp p mp mf f ff fff
+
+@program "Drum Kit" drumset-multi
+
+@group C1
+@keymap "Kick"
+kick_soft.wav   ppp mp
+kick_hard.wav   mf fff
+
+@group D1
+@keymap "Snare"
+snare_ghost.wav   ppp p
+snare_normal.wav  mp f
+snare_rimshot.wav ff fff
+
+@group F#1
+@keymap "HH Closed"
+hihat_closed_soft.wav  ppp mp
+hihat_closed_hard.wav  mf fff
+
+@group G#1
+@keymap "HH Open"
+hihat_open_soft.wav  ppp mp
+hihat_open_hard.wav  mf fff
+
+@group A1
+@keymap "Crash"
+crash_soft.wav  ppp mp
+crash_hard.wav  mf fff
