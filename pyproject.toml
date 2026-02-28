@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wav2krz"
-version = "0.7.1"
+version = "0.7.3"
 description = "Collect WAV files into Kurzweil .krz/.k25/.k26/.for format"
 requires-python = ">=3.10"
 authors = [
