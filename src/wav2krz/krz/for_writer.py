@@ -353,6 +353,7 @@ class ForWriter:
         keymap_ids = []
         key_ranges = []
         vel_zones = []
+        stereo_flags = []
 
         for seg in program.segments:
             if seg.tag == Segment.PGMSEGTAG:
@@ -362,6 +363,7 @@ class ForWriter:
                 hi = seg.data[4]
                 key_ranges.append((lo, hi))
                 vel_zones.append(self._vel_zone_from_byte(seg.data[5]))
+                stereo_flags.append(seg.data[8] == 0x24)
             elif seg.tag == Segment.CALSEGTAG:
                 # Extract .krz keymap ID (BE16 at data[7:9])
                 krz_km_id = (seg.data[7] << 8) | seg.data[8]
@@ -379,8 +381,9 @@ class ForWriter:
         # Only pass vel_zones if any are non-None
         vz = vel_zones if any(v is not None for v in vel_zones) else None
 
+        sf = stereo_flags if any(stereo_flags) else None
         data = build_program_data(layer_count, keymap_ids, key_ranges,
-                                  vel_zones=vz)
+                                  vel_zones=vz, stereo_flags=sf)
 
         self._write_object_header(f, FOR_TYPE_PROGRAM, for_id, program.name, len(data))
         f.write(data)
