@@ -42,9 +42,12 @@ class WavFile:
         return self.channels == 1
 
     def get_sample_period_ns(self) -> int:
-        """Get sample period in nanoseconds."""
-        if self.sample_info and self.sample_info.sample_period > 0:
-            return self.sample_info.sample_period
+        """Get sample period in nanoseconds.
+
+        Always computed from sample_rate using round() rather than using the
+        smpl chunk's period, which may be truncated by integer division and
+        can cause a -1ct tuning error on Kurzweil hardware.
+        """
         return int(round(1_000_000_000 / self.sample_rate))
 
 
