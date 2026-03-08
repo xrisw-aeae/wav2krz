@@ -160,6 +160,30 @@ piano_soft.wav   C4  v1-4
 piano_loud.wav   C4  v5-8
 ```
 
+### Fine Tuning (`tune=N`)
+
+Append `tune=N` to any sample line to adjust pitch by -50 to +50 cents. This applies per-sample tuning at the hardware level.
+
+```
+# Tune individual samples to match a recording
+piano_c4.wav  C4  tune=4
+piano_e4.wav  E4  tune=-2
+```
+
+Works alongside velocity zones and key ranges:
+
+```
+kick.wav  C2  ppp-mp  tune=-10
+```
+
+Inside groups:
+
+```
+@group C4
+piano_soft.wav   pp-mp   tune=3
+piano_loud.wav   mf-fff  tune=3
+```
+
 ### Groups (`@group`)
 
 Groups set a shared root key and optional key range for multiple samples. Inside a group, sample lines only need a filename and optional velocity.

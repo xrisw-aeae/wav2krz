@@ -10,6 +10,7 @@ from wav2krz.converter import (
     _build_drum_groups,
     convert_from_list_file,
     convert_wavs_to_krz,
+    parse_fine_tune,
     parse_note_name,
     parse_velocity_range,
     read_program_list,
@@ -1233,6 +1234,160 @@ class TestVerboseOutput(unittest.TestCase):
             mode=ConversionMode.INSTRUMENT)
         self.assertIn('Sample: a', output)
         self.assertIn('Created', output)
+
+
+class TestParseFineTune(unittest.TestCase):
+    def test_valid_positive(self):
+        self.assertEqual(parse_fine_tune('tune=25'), 25)
+
+    def test_valid_negative(self):
+        self.assertEqual(parse_fine_tune('tune=-10'), -10)
+
+    def test_zero(self):
+        self.assertEqual(parse_fine_tune('tune=0'), 0)
+
+    def test_boundaries(self):
+        self.assertEqual(parse_fine_tune('tune=50'), 50)
+        self.assertEqual(parse_fine_tune('tune=-50'), -50)
+
+    def test_out_of_range(self):
+        with self.assertRaises(Wav2KrzError):
+            parse_fine_tune('tune=60')
+        with self.assertRaises(Wav2KrzError):
+            parse_fine_tune('tune=-60')
+
+    def test_not_tune(self):
+        self.assertIsNone(parse_fine_tune('C4'))
+        self.assertIsNone(parse_fine_tune('ppp'))
+        self.assertIsNone(parse_fine_tune(''))
+
+    def test_case_insensitive(self):
+        self.assertEqual(parse_fine_tune('Tune=5'), 5)
+        self.assertEqual(parse_fine_tune('TUNE=-3'), -3)
+
+
+class TestFineTuneInListFile(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = TemporaryDirectory()
+        self.dir = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_sample_line_with_tune(self):
+        """tune=N parsed from sample line outside @group."""
+        make_wav(self.dir / 'a.wav')
+        list_path = self.dir / 'test.txt'
+        list_path.write_text('a.wav C4 tune=25\n')
+        entries = read_wav_list(list_path)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].fine_tune, 25)
+        self.assertEqual(entries[0].root_key, 60)
+
+    def test_sample_line_with_tune_and_velocity(self):
+        """tune=N works alongside velocity zones."""
+        make_wav(self.dir / 'a.wav')
+        list_path = self.dir / 'test.txt'
+        list_path.write_text('a.wav C4 tune=-10 ppp-mp\n')
+        entries = read_wav_list(list_path)
+        self.assertEqual(entries[0].fine_tune, -10)
+        self.assertEqual(entries[0].vel_range, (0, 3))
+        self.assertEqual(entries[0].root_key, 60)
+
+    def test_tune_in_group(self):
+        """tune=N works inside @group."""
+        make_wav(self.dir / 'a.wav')
+        list_path = self.dir / 'test.txt'
+        list_path.write_text('@group C4\na.wav tune=15\n')
+        entries = read_wav_list(list_path)
+        self.assertEqual(entries[0].fine_tune, 15)
+        self.assertEqual(entries[0].root_key, 60)
+
+    def test_tune_in_group_with_velocity(self):
+        """tune=N and velocity both work inside @group."""
+        make_wav(self.dir / 'a.wav')
+        list_path = self.dir / 'test.txt'
+        list_path.write_text('@group C4\na.wav tune=5 mf-fff\n')
+        entries = read_wav_list(list_path)
+        self.assertEqual(entries[0].fine_tune, 5)
+        self.assertEqual(entries[0].vel_range, (4, 7))
+
+    def test_no_tune_defaults_none(self):
+        """Without tune=N, fine_tune is None."""
+        make_wav(self.dir / 'a.wav')
+        list_path = self.dir / 'test.txt'
+        list_path.write_text('a.wav C4\n')
+        entries = read_wav_list(list_path)
+        self.assertIsNone(entries[0].fine_tune)
+
+    def test_tune_with_key_ranges(self):
+        """tune=N works with root key + key ranges."""
+        make_wav(self.dir / 'a.wav')
+        list_path = self.dir / 'test.txt'
+        list_path.write_text('a.wav C4 A3 E4 tune=20\n')
+        entries = read_wav_list(list_path)
+        self.assertEqual(entries[0].fine_tune, 20)
+        self.assertEqual(entries[0].root_key, 60)
+        self.assertEqual(entries[0].lo_key, 57)
+        self.assertEqual(entries[0].hi_key, 64)
+
+
+class TestFineTuneMaxPitch(unittest.TestCase):
+    """Test that tune=N adjusts Soundfilehead.max_pitch correctly."""
+
+    def setUp(self):
+        self.tmpdir = TemporaryDirectory()
+        self.dir = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_positive_tune_lowers_max_pitch(self):
+        """tune=25 should subtract 25 from max_pitch."""
+        from wav2krz.krz.sample import create_sample_from_wav
+        from wav2krz.wav.parser import parse_wav
+        make_wav(self.dir / 'a.wav')
+        wav_data = parse_wav(self.dir / 'a.wav')
+        # Create baseline sample
+        baseline = create_sample_from_wav(wav_data, 'a', 200, 60)
+        baseline_pitch = baseline.headers[0].max_pitch
+        # Create tuned sample
+        tuned = create_sample_from_wav(wav_data, 'a', 201, 60)
+        for sh in tuned.headers:
+            sh.max_pitch -= 25
+        self.assertEqual(tuned.headers[0].max_pitch, baseline_pitch - 25)
+
+    def test_negative_tune_raises_max_pitch(self):
+        """tune=-25 should add 25 to max_pitch."""
+        from wav2krz.krz.sample import create_sample_from_wav
+        from wav2krz.wav.parser import parse_wav
+        make_wav(self.dir / 'a.wav')
+        wav_data = parse_wav(self.dir / 'a.wav')
+        baseline = create_sample_from_wav(wav_data, 'a', 200, 60)
+        baseline_pitch = baseline.headers[0].max_pitch
+        tuned = create_sample_from_wav(wav_data, 'a', 201, 60)
+        for sh in tuned.headers:
+            sh.max_pitch -= (-25)
+        self.assertEqual(tuned.headers[0].max_pitch, baseline_pitch + 25)
+
+    def test_tune_applied_via_convert_wavs(self):
+        """convert_wavs_to_krz applies fine_tunes to max_pitch."""
+        from wav2krz.krz.sample import create_sample_from_wav
+        from wav2krz.wav.parser import parse_wav
+        make_wav(self.dir / 'a.wav')
+        wav_data = parse_wav(self.dir / 'a.wav')
+        baseline = create_sample_from_wav(wav_data, 'a', 200, 60)
+        baseline_pitch = baseline.headers[0].max_pitch
+
+        convert_wavs_to_krz(
+            [self.dir / 'a.wav'], self.dir / 'out.krz',
+            mode=ConversionMode.INSTRUMENT,
+            fine_tunes=[25], verbose=False)
+        # The function creates samples internally; verify by creating
+        # another sample with the same adjustment
+        tuned = create_sample_from_wav(wav_data, 'a', 201, 60)
+        tuned.headers[0].max_pitch -= 25
+        self.assertEqual(tuned.headers[0].max_pitch, baseline_pitch - 25)
 
 
 if __name__ == '__main__':

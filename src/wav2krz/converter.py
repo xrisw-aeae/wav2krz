@@ -74,6 +74,7 @@ class WavEntry:
     lo_key: Optional[int] = None  # Explicit low key (0-127)
     hi_key: Optional[int] = None  # Explicit high key (0-127)
     keymap_name: Optional[str] = None  # Per-entry keymap name (from @keymap in @group)
+    fine_tune: Optional[int] = None  # Fine tuning in cents (-50 to +50)
 
 
 @dataclass
@@ -316,6 +317,23 @@ def parse_velocity_range(spec: str) -> Optional[Tuple[int, int]]:
     return None
 
 
+def parse_fine_tune(spec: str) -> Optional[int]:
+    """Parse a fine-tune specification like 'tune=25' or 'tune=-10'.
+
+    Returns cents value (-50 to +50) or None if not a tune= token.
+    Raises Wav2KrzError if format matches but value is out of range.
+    """
+    match = re.match(r'^tune=(-?\d+)$', spec, re.IGNORECASE)
+    if not match:
+        return None
+    val = int(match.group(1))
+    if not (-50 <= val <= 50):
+        raise Wav2KrzError(
+            f"tune={val} out of range. Must be -50 to +50 cents."
+        )
+    return val
+
+
 def parse_note_name(note: str) -> Optional[int]:
     """
     Parse a note name (e.g., 'C4', 'F#3', 'Bb5') to MIDI note number.
@@ -445,6 +463,20 @@ def _parse_sample_line(parts: List[str], line_num: int, list_file: Path,
         wav_path = list_file.parent / wav_path
 
     entry = WavEntry(path=wav_path)
+
+    # Extract tune=N token from parts (can appear anywhere after filename)
+    filtered_parts = []
+    for p in parts[1:]:
+        ft = parse_fine_tune(p)
+        if ft is not None:
+            if entry.fine_tune is not None:
+                raise Wav2KrzError(
+                    f"Duplicate tune= on line {line_num}."
+                )
+            entry.fine_tune = ft
+        else:
+            filtered_parts.append(p)
+    parts = [parts[0]] + filtered_parts
 
     if group is not None:
         # Inside a @group: inherit root_key/lo_key/hi_key, only velocity is optional
@@ -748,6 +780,7 @@ def convert_wavs_to_krz(
     root_keys: Optional[List[Optional[int]]] = None,
     vel_ranges: Optional[List[Optional[Tuple[int, int]]]] = None,
     key_ranges: Optional[List[Optional[Tuple[int, int]]]] = None,
+    fine_tunes: Optional[List[Optional[int]]] = None,
     entries: Optional[List[WavEntry]] = None,
     verbose: bool = True
 ) -> None:
@@ -769,6 +802,8 @@ def convert_wavs_to_krz(
         key_ranges: Per-sample key ranges as (lokey, hikey) tuples.
                     When specified, the fill algorithm will not extend
                     a sample beyond these bounds.
+        fine_tunes: Per-sample fine tuning in cents (-50 to +50).
+                    Applied to Soundfilehead max_pitch.
         entries: Original WavEntry list (used for drumset-multi grouping)
 
     Raises:
@@ -811,6 +846,13 @@ def convert_wavs_to_krz(
             sample_root_key = 60
 
         sample = create_sample_from_wav(wav_data, sample_name, sample_id, sample_root_key)
+
+        # Apply fine tuning to max_pitch in all soundfile headers
+        ft = fine_tunes[i] if fine_tunes is not None and i < len(fine_tunes) else None
+        if ft:
+            for sh in sample.headers:
+                sh.max_pitch -= ft
+
         samples.append(sample)
         writer.add_sample(sample)
         sample_id += 1
@@ -818,7 +860,8 @@ def convert_wavs_to_krz(
         if verbose:
             stereo_str = "stereo" if sample.is_stereo() else "mono"
             depth_str = " 24→16-bit" if wav_data.bits_per_sample == 24 else ""
-            print(f"  Sample: {sample_name} ({_midi_to_note(sample_root_key)}, {stereo_str}{depth_str})")
+            tune_str = f", tune={ft}" if ft else ""
+            print(f"  Sample: {sample_name} ({_midi_to_note(sample_root_key)}, {stereo_str}{depth_str}{tune_str})")
 
         # Track velocity range for this sample
         vr = None
@@ -1001,6 +1044,7 @@ def _process_section(
     wav_files = [e.path for e in entries]
     root_keys = [e.root_key for e in entries]
     vel_ranges = [e.vel_range for e in entries]
+    fine_tunes = [e.fine_tune for e in entries]
     key_ranges = [
         (e.lo_key, e.hi_key) if e.lo_key is not None else None
         for e in entries
@@ -1034,6 +1078,13 @@ def _process_section(
             sample_root_key = 60
 
         sample = create_sample_from_wav(wav_data, sample_name, sample_id, sample_root_key)
+
+        # Apply fine tuning to max_pitch in all soundfile headers
+        ft = fine_tunes[i]
+        if ft:
+            for sh in sample.headers:
+                sh.max_pitch -= ft
+
         samples.append(sample)
         writer.add_sample(sample)
         sample_id += 1
@@ -1041,7 +1092,8 @@ def _process_section(
         if verbose:
             stereo_str = "stereo" if sample.is_stereo() else "mono"
             depth_str = " 24→16-bit" if wav_data.bits_per_sample == 24 else ""
-            print(f"  Sample: {sample_name} ({_midi_to_note(sample_root_key)}, {stereo_str}{depth_str})")
+            tune_str = f", tune={ft}" if ft else ""
+            print(f"  Sample: {sample_name} ({_midi_to_note(sample_root_key)}, {stereo_str}{depth_str}{tune_str})")
 
         vr = vel_ranges[i]
         sample_vel_ranges.append(vr)
